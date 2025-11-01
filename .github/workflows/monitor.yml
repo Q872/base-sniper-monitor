@@ -1,7 +1,7 @@
 name: Base Sniper Monitor
 on:
   schedule:
-    - cron: '*/5 * * * *'
+    - '*/8 * * * *'
   workflow_dispatch:
 jobs:
   monitor:
