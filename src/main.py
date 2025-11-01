@@ -6,7 +6,7 @@ Base链智能狙击监控系统 - 主程序
 
 import asyncio
 import time
-from src.config import CONFIG, API_KEY
+from config import CONFIG, API_KEY
 
 class BaseSniperMonitor:
     def __init__(self):
