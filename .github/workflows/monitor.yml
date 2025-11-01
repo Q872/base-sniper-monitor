@@ -17,11 +17,3 @@ jobs:
       run: pip install -r requirements.txt
     - name: Run monitor
       run: python src/main.py
-      import time
-if __name__ == "__main__":
-    while True:
-        try:
-            monitor()  # 你主逻辑函数
-        except Exception as e:
-            print("Error:", e)
-        time.sleep(300)  # 每5分钟运行一次
