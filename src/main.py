@@ -143,3 +143,9 @@ async def main():
 if __name__ == "__main__":
     # 运行主程序（智能循环）
     asyncio.run(main())
+jobs:
+  monitor:
+    runs-on: ubuntu-latest
+    timeout-minutes: 3    # 添加这行，限制最多运行3分钟
+    steps:
+    # ... 其他步骤不变
