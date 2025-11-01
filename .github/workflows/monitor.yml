@@ -1,19 +1,25 @@
 name: Base Sniper Monitor
+
 on:
   schedule:
-    - '*/8 * * * *'
+    - cron: '*/8 * * * *'
   workflow_dispatch:
+
 jobs:
   monitor:
     runs-on: ubuntu-latest
+    timeout-minutes: 3
     steps:
     - name: Checkout code
       uses: actions/checkout@v3
+      
     - name: Set up Python
       uses: actions/setup-python@v4
       with:
         python-version: '3.9'
+        
     - name: Install dependencies
       run: pip install -r requirements.txt
+        
     - name: Run monitor
       run: python src/main.py
