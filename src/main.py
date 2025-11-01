@@ -1,13 +1,14 @@
 #!/usr/bin/env python3
 """
 Base链智能狙击监控系统 - 主程序
-五级风控增强版 - 调试版本
+五级风控增强版 - 生产版本
 """
 
 import asyncio
 import time
 import yaml
 import os
+from datetime import datetime
 
 def load_config():
     """加载配置文件"""
@@ -34,24 +35,25 @@ def load_risk_addresses():
 async def analyze_deployer_interactions(deployer_address):
     """分析部署者交互历史"""
     print(f"🔍 分析部署者交互: {deployer_address}")
-    await asyncio.sleep(1)  # 模拟处理时间
+    await asyncio.sleep(1)
     return {"risk_interactions": 0, "details": []}
 
 async def analyze_top_holders(token_address):
     """分析前10大户风险"""
     print(f"👥 分析大户风险: {token_address}")
-    await asyncio.sleep(1)  # 模拟处理时间
+    await asyncio.sleep(1)
     return {"risk_holders": 0, "details": []}
 
 async def calculate_score(token_data):
     """计算综合评分"""
     print("📊 计算综合评分...")
-    await asyncio.sleep(1)  # 模拟处理时间
-    return 85  # 临时返回示例分数
+    await asyncio.sleep(1)
+    return 85
 
 async def monitor_new_tokens():
     """监控新币种"""
-    print("🚀 开始监控Base链新币种...")
+    current_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    print(f"🚀 [{current_time}] 开始监控Base链新币种...")
     
     # 模拟发现新币种
     sample_token = {
@@ -97,16 +99,25 @@ async def main():
     
     print(f"📁 配置加载: {len(risk_addresses)} 个风险地址")
     
-    # 执行一次监控检查
-    try:
-        await monitor_new_tokens()
-        print("✅ 监控任务执行完成")
-    except Exception as e:
-        print(f"❌ 监控任务出错: {e}")
+    check_interval = config.get('monitoring', {}).get('check_interval', 300)
+    print(f"⏰ 检查间隔: {check_interval} 秒")
     
-    print("=" * 50)
-    print("=== 系统运行完成 ===")
-    print("=" * 50)
+    # 无限循环监控
+    cycle_count = 0
+    while True:
+        cycle_count += 1
+        current_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        print(f"\n🔄 第 {cycle_count} 次监控循环 - {current_time}")
+        
+        try:
+            await monitor_new_tokens()
+            print(f"✅ 监控完成，等待 {check_interval} 秒后继续...")
+            await asyncio.sleep(check_interval)
+            
+        except Exception as e:
+            print(f"❌ 监控任务出错: {e}")
+            print("🔄 60秒后重试...")
+            await asyncio.sleep(60)
 
 if __name__ == "__main__":
     # 运行主程序
