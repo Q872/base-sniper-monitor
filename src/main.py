@@ -1,11 +1,10 @@
 #!/usr/bin/env python3
 """
 Base链智能狙击监控系统 - 主程序
-五级风控增强版 - 生产版本
+五级风控增强版 - 智能循环版本
 """
 
 import asyncio
-import time
 import yaml
 import os
 from datetime import datetime
@@ -35,30 +34,30 @@ def load_risk_addresses():
 async def analyze_deployer_interactions(deployer_address):
     """分析部署者交互历史"""
     print(f"🔍 分析部署者交互: {deployer_address}")
-    await asyncio.sleep(1)
+    await asyncio.sleep(0.5)
     return {"risk_interactions": 0, "details": []}
 
 async def analyze_top_holders(token_address):
     """分析前10大户风险"""
     print(f"👥 分析大户风险: {token_address}")
-    await asyncio.sleep(1)
+    await asyncio.sleep(0.5)
     return {"risk_holders": 0, "details": []}
 
 async def calculate_score(token_data):
     """计算综合评分"""
     print("📊 计算综合评分...")
-    await asyncio.sleep(1)
+    await asyncio.sleep(0.5)
     return 85
 
-async def monitor_new_tokens():
+async def monitor_new_tokens(cycle_count):
     """监控新币种"""
     current_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    print(f"🚀 [{current_time}] 开始监控Base链新币种...")
+    print(f"🚀 [{current_time}] 第{cycle_count}次监控Base链新币种...")
     
     # 模拟发现新币种
     sample_token = {
         "address": "0x1234567890abcdef",
-        "name": "TESTTOKEN", 
+        "name": f"TESTTOKEN{cycle_count}", 
         "deployer": "0xabcdef1234567890"
     }
     
@@ -100,25 +99,47 @@ async def main():
     print(f"📁 配置加载: {len(risk_addresses)} 个风险地址")
     
     check_interval = config.get('monitoring', {}).get('check_interval', 300)
-    print(f"⏰ 检查间隔: {check_interval} 秒")
+    max_runtime = config.get('monitoring', {}).get('max_runtime', 3600)  # 默认运行1小时
     
-    # 无限循环监控
+    print(f"⏰ 检查间隔: {check_interval} 秒")
+    print(f"⏱️ 最大运行时间: {max_runtime} 秒")
+    
+    start_time = datetime.now()
     cycle_count = 0
-    while True:
+    
+    # 智能循环：在最大运行时间内循环
+    while (datetime.now() - start_time).total_seconds() < max_runtime:
         cycle_count += 1
         current_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        elapsed_time = (datetime.now() - start_time).total_seconds()
+        
         print(f"\n🔄 第 {cycle_count} 次监控循环 - {current_time}")
+        print(f"⏳ 已运行: {elapsed_time:.0f} 秒")
         
         try:
-            await monitor_new_tokens()
-            print(f"✅ 监控完成，等待 {check_interval} 秒后继续...")
-            await asyncio.sleep(check_interval)
+            await monitor_new_tokens(cycle_count)
+            remaining_time = max_runtime - elapsed_time
             
+            if remaining_time > check_interval:
+                print(f"✅ 监控完成，等待 {check_interval} 秒后继续...")
+                await asyncio.sleep(check_interval)
+            else:
+                print(f"⏰ 达到最大运行时间，准备退出...")
+                break
+                
         except Exception as e:
             print(f"❌ 监控任务出错: {e}")
             print("🔄 60秒后重试...")
             await asyncio.sleep(60)
+    
+    total_runtime = (datetime.now() - start_time).total_seconds()
+    print(f"\n🎯 监控会话结束")
+    print(f"📊 总运行时间: {total_runtime:.0f} 秒")
+    print(f"🔄 完成循环次数: {cycle_count} 次")
+    print("=" * 50)
+    print("=== 等待下次GitHub Actions触发 ===")
+    print("=" * 50)
 
 if __name__ == "__main__":
-    # 运行主程序
+    # 运行主程序（智能循环）
     asyncio.run(main())
