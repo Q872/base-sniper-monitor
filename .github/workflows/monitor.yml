@@ -2,7 +2,7 @@ name: Base Sniper Monitor
 
 on:
   schedule:
-    - cron: '*/5 * * * *'  # 每5分钟运行一次（修正：5个字段）
+    - cron: '*/5 * * * *'  # 每5分钟运行一次
   workflow_dispatch:  # 允许手动触发
 
 jobs:
@@ -24,7 +24,6 @@ jobs:
         
     - name: Run monitor
       env:
-        BASESCAN_API_KEY: ${{ secrets.BASESCAN_API_KEY }}  # 修正：BASESCAN
+        BASESCAN_API_KEY: ${{ secrets.BASESCAN_API_KEY }}
       run: |
-        cd /home/runner/work/base-sniper-monitor/base-sniper-monitor
         python src/main.py
