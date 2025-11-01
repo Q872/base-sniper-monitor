@@ -1,0 +1,31 @@
+# Base链智能狙击监控系统配置
+
+# API配置
+api:
+  basescan:
+    url: "https://api.basescan.org/api"
+    # API密钥将通过环境变量设置
+  
+# 风控阈值配置
+risk_thresholds:
+  min_score: 50  # 最低推送分数
+  good_score: 70  # 优质项目分数
+  max_deployer_risk_interactions: 3  # 部署者最大风险交互数
+  max_holder_risk_count: 2  # 前10大户最大风险地址数
+
+# 评分权重配置
+scoring:
+  base_safety: 30  # 基础安全分
+  interaction_analysis: 40  # 交互图谱分析分
+  market_confidence: 30  # 市场信心分
+
+# 监控配置
+monitoring:
+  check_interval: 300  # 检查间隔(秒)
+  max_analysis_time: 180  # 最大分析时间(秒)
+
+# 推送配置
+notification:
+  enable_telegram: false  # 默认关闭，后续配置
+  telegram_bot_token: ""  # 通过环境变量设置
+  telegram_chat_id: ""    # 通过环境变量设置
