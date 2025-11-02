@@ -415,7 +415,7 @@ async def analyze_token(token_data):
     
     quality_tokens = 0
     
-     if score >= 50:
+    if score >= 50:
         print("   🟢 优质项目 - 发送警报")
         # 在警报中添加收益率信息
         if returns:
