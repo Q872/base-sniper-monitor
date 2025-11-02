@@ -2,24 +2,45 @@ name: Base Sniper Monitor
 
 on:
   schedule:
-    - cron: '*/8 * * * *'
+    - cron: '*/8 * * * *'  # 每8分钟
   workflow_dispatch:
 
 jobs:
   monitor:
     runs-on: ubuntu-latest
-    timeout-minutes: 3
+    timeout-minutes: 5
+    
     steps:
-    - name: Checkout code
-      uses: actions/checkout@v3
-      
-    - name: Set up Python
-      uses: actions/setup-python@v4
-      with:
-        python-version: '3.9'
+      - name: 检出代码
+        uses: actions/checkout@v4
         
-    - name: Install dependencies
-      run: pip install -r requirements.txt
+      - name: 设置Python环境
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.9'
+          
+      - name: 验证Secrets配置
+        run: |
+          echo "验证Telegram Secrets配置:"
+          if [ -n "$TELEGRAM_BOT_TOKEN" ]; then
+            echo "✅ TELEGRAM_BOT_TOKEN 已设置"
+          else
+            echo "❌ TELEGRAM_BOT_TOKEN 未设置"
+          fi
+          if [ -n "$TELEGRAM_CHAT_ID" ]; then
+            echo "✅ TELEGRAM_CHAT_ID 已设置"
+          else
+            echo "❌ TELEGRAM_CHAT_ID 未设置"
+          fi
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ 8000293906:AAHHnibFwUtvI4t9ppgUEcMDHyg9B6B3YOo }}
+          TELEGRAM_CHAT_ID: ${{ 1997769382 }}
+          
+      - name: 安装依赖
+        run: pip install -r requirements.txt
         
-    - name: Run monitor
-      run: python src/main.py
+      - name: 运行监控
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: python src/main.py
