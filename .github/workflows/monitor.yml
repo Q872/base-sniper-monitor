@@ -3,7 +3,7 @@ name: Base链监控
 on:
   schedule:
     - cron: '*/8 * * * *'  # 每8分钟
-  workflow_dispatch:
+  workflow_dispatch:        # 手动触发
 
 jobs:
   monitor:
@@ -33,8 +33,8 @@ jobs:
             echo "❌ TELEGRAM_CHAT_ID 未设置"
           fi
         env:
-          TELEGRAM_BOT_TOKEN: ${{8000293906:AAHHnibFwUtvI4t9ppgUEcMDHyg9B6B3YOo }}
-          TELEGRAM_CHAT_ID: ${{ 1997769382 }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
           
       - name: 安装依赖
         run: pip install -r requirements.txt
