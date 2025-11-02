@@ -498,21 +498,6 @@ async def main():
     print("=== 完整功能版 + 价格追踪 ===")
     print("=" * 50)
 
-    # 🔧 添加在这里 - 强制测试 Telegram 连接
-    print("🔧 强制测试 Telegram 连接...")
-    test_token_data = {
-        "name": "测试代币",
-        "symbol": "TEST",
-        "liquidity": 10000,
-        "volume": 50000,
-        "age_minutes": 5,
-        "price_change_24h": 10.5,
-        "address": "0xTEST123456789",
-        "url": "https://dexscreener.com/base/0xTEST"
-    }
-    await send_telegram_alert(test_token_data, 80)
-    print("✅ 强制测试消息已发送")
-
     start_time = datetime.now()
     
     # 加载配置和风险数据库
