@@ -1,4 +1,4 @@
-name: Base Sniper Monitor
+name: Base链监控
 
 on:
   schedule:
@@ -33,7 +33,7 @@ jobs:
             echo "❌ TELEGRAM_CHAT_ID 未设置"
           fi
         env:
-          TELEGRAM_BOT_TOKEN: ${{ 8000293906:AAHHnibFwUtvI4t9ppgUEcMDHyg9B6B3YOo }}
+          TELEGRAM_BOT_TOKEN: ${{8000293906:AAHHnibFwUtvI4t9ppgUEcMDHyg9B6B3YOo }}
           TELEGRAM_CHAT_ID: ${{ 1997769382 }}
           
       - name: 安装依赖
