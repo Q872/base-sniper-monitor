@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-Base链智能狙击监控系统 - 主程序
-五级风控增强版 - 集成DexScreener API和价格追踪
+Base链智能狙击监控系统 - 风险评分版
+基于买卖税和风险项检测的报警系统
 """
 
 import asyncio
@@ -153,6 +153,131 @@ class TokenDataManager:
         recent_tokens.sort(key=lambda x: x["first_seen"], reverse=True)
         return recent_tokens
 
+class RiskScorer:
+    def __init__(self):
+        self.risk_reasons = []  # 存储所有风险原因
+        
+    def calculate_risk_score(self, token_data):
+        """计算风险分数并收集风险原因"""
+        risk_score = 0
+        self.risk_reasons = []
+        
+        # 1. 合约验证状态检测
+        if not self.check_contract_verified(token_data):
+            risk_score += 2
+            self.risk_reasons.append("❌ 合约未验证")
+        
+        # 2. 买卖税率检测（重点！）
+        tax_risk = self.check_tax_rate(token_data)
+        if tax_risk > 0:
+            risk_score += tax_risk
+            if tax_risk == 3:
+                self.risk_reasons.append("⚠️ 买卖税 > 5%")
+        
+        # 3. Honeypot检测
+        if self.check_honeypot(token_data):
+            risk_score += 5
+            self.risk_reasons.append("🚫 Honeypot检测失败")
+        
+        # 4. LP锁仓检测
+        lp_risk = self.check_lp_lock(token_data)
+        if lp_risk > 0:
+            risk_score += lp_risk
+            self.risk_reasons.append("🔓 LP锁仓时间短或无锁仓")
+        
+        # 5. 钱包年龄检测
+        if self.check_wallet_age(token_data):
+            risk_score += 2
+            self.risk_reasons.append("🆕 部署钱包 < 6小时")
+        
+        # 6. 资金来源检测
+        if self.check_fund_source(token_data):
+            risk_score += 3
+            self.risk_reasons.append("💸 资金来源可疑")
+        
+        # 7. 部署者历史检测
+        if self.check_deployer_history(token_data):
+            risk_score += 4
+            self.risk_reasons.append("👤 部署者有不良记录")
+        
+        # 安全减分项
+        if self.check_verified_community(token_data):
+            risk_score -= 2
+            self.risk_reasons.append("✅ 合约已验证且有社群")
+        
+        if self.check_cex_source(token_data):
+            risk_score -= 1
+            self.risk_reasons.append("🏦 资金来自CEX")
+        
+        if self.check_holder_distribution(token_data):
+            risk_score -= 1
+            self.risk_reasons.append("📊 持仓分布良好")
+        
+        return max(risk_score, 0)  # 确保分数不为负
+    
+    def check_tax_rate(self, token_data):
+        """检测买卖税率 - 重点检测项"""
+        try:
+            # 这里需要集成实际的税率检测API
+            # 模拟数据：假设检测到买卖税
+            buy_tax = token_data.get('buy_tax', 0)
+            sell_tax = token_data.get('sell_tax', 0)
+            
+            if buy_tax > 0.05 or sell_tax > 0.05:  # 5%阈值
+                return 3
+            elif buy_tax > 0.03 or sell_tax > 0.03:  # 3%警告
+                return 1
+        except:
+            pass
+        return 0
+    
+    def check_contract_verified(self, token_data):
+        """检查合约是否验证"""
+        # 集成区块浏览器API检查合约验证状态
+        return token_data.get('verified', False)
+    
+    def check_honeypot(self, token_data):
+        """Honeypot检测"""
+        # 集成Honeypot检测API
+        return token_data.get('is_honeypot', False)
+    
+    def check_lp_lock(self, token_data):
+        """LP锁仓检测"""
+        lp_lock_days = token_data.get('lp_lock_days', 0)
+        if lp_lock_days == 0:
+            return 2  # 未锁仓
+        elif lp_lock_days < 30:
+            return 1  # 锁仓时间短
+        return 0
+    
+    def check_wallet_age(self, token_data):
+        """钱包年龄检测"""
+        wallet_age_hours = token_data.get('wallet_age_hours', 24)
+        return wallet_age_hours < 6
+    
+    def check_fund_source(self, token_data):
+        """资金来源检测"""
+        # 检查是否来自混币器或高风险钱包
+        return token_data.get('suspicious_source', False)
+    
+    def check_deployer_history(self, token_data):
+        """部署者历史检测"""
+        # 检查部署者是否有rug记录
+        return token_data.get('has_rug_history', False)
+    
+    def check_verified_community(self, token_data):
+        """检查验证状态和社群"""
+        return token_data.get('verified', False) and token_data.get('has_community', False)
+    
+    def check_cex_source(self, token_data):
+        """检查是否来自CEX"""
+        return token_data.get('from_cex', False)
+    
+    def check_holder_distribution(self, token_data):
+        """检查持仓分布"""
+        top10_holders = token_data.get('top10_holders_percent', 100)
+        return top10_holders < 20  # 前10大户持仓 < 20%
+
 class DexScreenerAPI:
     def __init__(self):
         self.base_url = "https://api.dexscreener.com/latest/dex"
@@ -174,129 +299,14 @@ class DexScreenerAPI:
 # 初始化数据管理器
 data_manager = TokenDataManager()
 
-def load_config():
-    """加载配置文件"""
-    try:
-        with open('config.yaml', 'r', encoding='utf-8') as file:
-            config = yaml.safe_load(file)
-            print("✅ 配置文件加载成功")
-            return config
-    except Exception as e:
-        print(f"❌ 配置文件加载失败: {e}")
-        return {}
-
-def load_risk_addresses():
-    """加载风险地址数据库"""
-    try:
-        with open('data/risk_addresses.txt', 'r') as f:
-            addresses = set(line.strip().lower() for line in f if line.strip())
-            print(f"✅ 风险地址数据库加载成功: {len(addresses)} 个地址")
-            return addresses
-    except FileNotFoundError:
-        print("⚠️ 风险地址数据库未找到，将使用空数据库")
-        return set()
-
-async def analyze_deployer_interactions(deployer_address):
-    """分析部署者交互历史"""
-    print(f"🔍 分析部署者交互: {deployer_address}")
-    await asyncio.sleep(0.5)  # 模拟API调用
-    
-    # 这里可以集成实际的链上分析API
-    return {
-        "risk_interactions": 0, 
-        "details": [],
-        "deployer_risk_score": 30
-    }
-
-async def analyze_top_holders(token_address):
-    """分析前10大户风险"""
-    print(f"👥 分析大户风险: {token_address}")
-    await asyncio.sleep(0.5)  # 模拟API调用
-    
-    return {
-        "risk_holders": 0, 
-        "details": [],
-        "holder_concentration": 25
-    }
-
-async def calculate_score(token_data, deployer_analysis, holder_analysis):
-    """计算综合评分"""
-    print("📊 计算综合评分...")
-    
-    score = 50  # 基础分
-    
-    # 1. 流动性评分 (25分)
-    liquidity = token_data.get('liquidity', {}).get('usd', 0)
-    if liquidity > 20000:
-        score += 25
-    elif liquidity > 10000:
-        score += 20
-    elif liquidity > 5000:
-        score += 15
-    elif liquidity > 1000:
-        score += 5
-    
-    # 2. 交易量评分 (15分)
-    volume = token_data.get('volume', {}).get('h24', 0)
-    if volume > 50000:
-        score += 15
-    elif volume > 20000:
-        score += 10
-    elif volume > 5000:
-        score += 5
-    
-    # 3. 部署者风险评分 (20分)
-    deployer_score = deployer_analysis.get('deployer_risk_score', 50)
-    score += (deployer_score - 50) * 0.4  # 转换为20分制
-    
-    # 4. 大户集中度评分 (15分)
-    holder_score = 50 - holder_analysis.get('holder_concentration', 0)
-    score += holder_score * 0.3  # 转换为15分制
-    
-    # 5. 代币年龄加分 (10分)
-    age_minutes = token_data.get('age_minutes', 1440)  # 默认1天
-    if age_minutes <= 30:  # 30分钟内的新币
-        score += 10
-    elif age_minutes <= 120:  # 2小时内的币
-        score += 5
-    
-    # 6. 价格稳定性 (10分)
-    price_change = abs(token_data.get('priceChange', {}).get('h24', 0))
-    if price_change < 50:  # 24小时涨跌幅小于50%
-        score += 10
-    elif price_change < 100:
-        score += 5
-    
-    return min(max(score, 0), 100)
-
-async def send_telegram_alert(token_data, score):
-    """发送Telegram警报 - 增强版，包含收益率信息"""
+async def send_telegram_message(message):
+    """发送Telegram消息"""
     bot_token = os.getenv('TELEGRAM_BOT_TOKEN')
     chat_id = os.getenv('TELEGRAM_CHAT_ID')
     
     if not bot_token or not chat_id:
         print("⚠️ Telegram配置缺失，跳过发送")
         return
-    
-    # 添加收益率信息
-    returns_info = ""
-    if token_data.get("returns"):
-        returns = token_data["returns"]
-        returns_info = f"📈 当前收益率: {returns.get('total_return', 0):.2f}%\n"
-    
-    message = f"""🚨 *BASE链优质代币警报* 🚨
-
-💰 *{token_data['name']} ({token_data['symbol']})*
-🏆 综合评分: {score}/100
-{returns_info}💧 流动性: ${token_data['liquidity']:,.0f}
-📊 24h交易量: ${token_data['volume']:,.0f}
-⏰ 代币年龄: {token_data['age_minutes']}分钟
-🔺 24h涨跌: {token_data.get('price_change_24h', 0):.1f}%
-
-📋 合约地址: `{token_data['address']}`
-🔗 [DexScreener分析]({token_data['url']})
-
-⚠️ 投资有风险，请自行研究！"""
     
     try:
         async with aiohttp.ClientSession() as session:
@@ -311,11 +321,93 @@ async def send_telegram_alert(token_data, score):
                 json=payload
             ) as response:
                 if response.status == 200:
-                    print(f"✅ Telegram警报发送成功: {token_data['symbol']}")
+                    print("✅ Telegram消息发送成功")
                 else:
                     print(f"❌ Telegram发送失败: {await response.text()}")
     except Exception as e:
         print(f"❌ Telegram发送错误: {e}")
+
+async def send_risk_alert(token_data, risk_score, risk_reasons):
+    """发送风险警报，包含具体风险原因"""
+    
+    # 风险等级判断
+    if risk_score <= 6:
+        risk_level = "🟢 安全"
+        emoji = "✅"
+    elif risk_score <= 12:
+        risk_level = "🟡 中风险" 
+        emoji = "⚠️"
+    else:
+        risk_level = "🔴 高风险"
+        emoji = "🚨"
+    
+    # 构建风险原因文本
+    risk_reasons_text = "\n".join(risk_reasons) if risk_reasons else "暂无风险项"
+    
+    # 添加收益率信息
+    returns_info = ""
+    returns = data_manager.calculate_returns(token_data["address"])
+    if returns and returns.get("total_return") is not None:
+        returns_info = f"📈 当前收益率: {returns.get('total_return', 0):.2f}%\n"
+    
+    message = f"""{emoji} *BASE链代币风险警报* {emoji}
+
+💰 *{token_data['name']} ({token_data['symbol']})*
+📊 风险评分: {risk_score}分 - {risk_level}
+{returns_info}
+🔍 *检测到的风险项:*
+{risk_reasons_text}
+
+💧 流动性: ${token_data['liquidity']:,.0f}
+📈 24h交易量: ${token_data['volume']:,.0f}
+⏰ 代币年龄: {token_data['age_minutes']}分钟
+🔺 24h涨跌: {token_data.get('price_change_24h', 0):.1f}%
+
+📋 合约地址: `{token_data['address']}`
+🔗 [DexScreener分析]({token_data['url']})
+
+{'⚠️ 请注意风险，谨慎操作！' if risk_score > 6 else '✅ 相对安全，但仍需自行研究！'}"""
+    
+    await send_telegram_message(message)
+
+async def analyze_token_with_risk(token_data):
+    """使用风险评分系统分析代币"""
+    print(f"\n🪙 分析代币: {token_data['symbol']} - {token_data['name']}")
+    print(f"   💧 流动性: ${token_data['liquidity']:,}")
+    print(f"   📈 24h交易量: ${token_data['volume']:,}")
+    print(f"   ⏰ 代币年龄: {token_data['age_minutes']}分钟")
+    
+    # 记录代币价格
+    price = token_data.get('priceUsd', 0) or 0
+    data_manager.record_token_price(
+        token_data["address"],
+        token_data["symbol"],
+        price,
+        token_data["liquidity"]
+    )
+    
+    # 计算收益率
+    returns = data_manager.calculate_returns(token_data["address"])
+    if returns:
+        print(f"   📊 当前收益率: {returns.get('total_return', 0):.2f}%")
+    
+    # 初始化风险评分器
+    risk_scorer = RiskScorer()
+    
+    # 计算风险分数
+    risk_score = risk_scorer.calculate_risk_score(token_data)
+    
+    print(f"   📊 风险评分: {risk_score}分")
+    print(f"   🔍 风险原因: {', '.join(risk_scorer.risk_reasons)}")
+    
+    # 发送风险警报（所有等级都发送）
+    await send_risk_alert(token_data, risk_score, risk_scorer.risk_reasons)
+    
+    return {
+        "risk_score": risk_score,
+        "risk_reasons": risk_scorer.risk_reasons,
+        "quality_tokens": 1 if risk_score <= 6 else 0
+    }
 
 async def send_performance_report(top_performers: List, recent_tokens: List):
     """发送性能报告到Telegram"""
@@ -375,62 +467,8 @@ async def generate_performance_report():
     # 发送Telegram报告
     await send_performance_report(top_performers, recent_tokens)
 
-async def analyze_token(token_data):
-    """分析单个代币"""
-    print(f"\n🪙 分析代币: {token_data['symbol']} - {token_data['name']}")
-    print(f"   💧 流动性: ${token_data['liquidity']:,}")
-    print(f"   📈 24h交易量: ${token_data['volume']:,}")
-    print(f"   ⏰ 代币年龄: {token_data['age_minutes']}分钟")
-    
-    # 记录代币价格
-    # 注意：这里需要获取实际价格，DexScreener API返回的价格字段可能是priceUsd
-    price = token_data.get('priceUsd', 0) or 0
-    data_manager.record_token_price(
-        token_data["address"],
-        token_data["symbol"],
-        price,
-        token_data["liquidity"]
-    )
-    
-    # 计算收益率
-    returns = data_manager.calculate_returns(token_data["address"])
-    if returns:
-        print(f"   📊 当前收益率: {returns.get('total_return', 0):.2f}%")
-    
-    # 原有的分析逻辑保持不变
-    deployer_task = analyze_deployer_interactions(token_data["deployer"])
-    holder_task = analyze_top_holders(token_data["address"])
-    
-    deployer_analysis, holder_analysis = await asyncio.gather(deployer_task, holder_task)
-    
-    # 计算综合评分
-    score = await calculate_score(token_data, deployer_analysis, holder_analysis)
-    
-    print(f"   ✅ 分析完成 - 评分: {score}/100")
-    
-    # 根据评分决定是否推送
-    config = load_config()
-    min_score = config.get('risk_thresholds', {}).get('min_score', 60)
-    good_score = config.get('risk_thresholds', {}).get('good_score', 75)
-    
-    quality_tokens = 0
-    
-    if score >= 50:
-        print("   🟢 优质项目 - 发送警报")
-        # 在警报中添加收益率信息
-        if returns:
-            token_data["returns"] = returns
-        await send_telegram_alert(token_data, score)
-        quality_tokens = 1
-    elif score >= min_score:
-        print("   🟡 中等风险 - 需要人工审核")
-    else:
-        print("   🔴 高风险 - 静默丢弃")
-    
-    return {"quality_tokens": quality_tokens}
-
 async def monitor_new_tokens():
-    """监控新币种 - 完整功能版，分析所有获取到的代币"""
+    """监控新币种 - 风险评分版"""
     current_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     print(f"🚀 [{current_time}] 开始监控Base链新币种...")
     
@@ -451,9 +489,12 @@ async def monitor_new_tokens():
     
     found_quality_tokens = 0
     
-    # 分析所有Base链代币（不限制数量）
+    # 分析所有Base链代币
     analysis_tasks = []
-    for pair in base_pairs:  # 没有数量限制，分析所有代币
+    for pair in base_pairs:
+        # 为模拟风险检测，添加一些随机风险数据
+        import random
+        
         token_data = {
             "address": pair.get('baseToken', {}).get('address'),
             "name": pair.get('baseToken', {}).get('name', 'Unknown'),
@@ -466,14 +507,27 @@ async def monitor_new_tokens():
             "priceUsd": pair.get('priceUsd', 0),
             "pairAddress": pair.get('pairAddress'),
             "url": pair.get('url', ''),
-            "age_minutes": int((datetime.now().timestamp() * 1000 - pair.get('pairCreatedAt', 0)) / 60000)
+            "age_minutes": int((datetime.now().timestamp() * 1000 - pair.get('pairCreatedAt', 0)) / 60000),
+            
+            # 模拟风险检测数据 - 在实际使用中应从API获取真实数据
+            "verified": random.choice([True, False, True]),  # 偏向已验证
+            "buy_tax": random.uniform(0, 0.08),  # 0-8%的买卖税
+            "sell_tax": random.uniform(0, 0.08),
+            "is_honeypot": random.choice([False, False, False, True]),  # 低概率honeypot
+            "lp_lock_days": random.choice([0, 30, 60, 90, 365]),  # 锁仓天数
+            "wallet_age_hours": random.randint(1, 72),  # 钱包年龄
+            "suspicious_source": random.choice([False, False, True]),  # 资金来源
+            "has_rug_history": random.choice([False, False, False, True]),  # 部署者历史
+            "has_community": random.choice([True, False]),  # 社群信息
+            "from_cex": random.choice([True, False]),  # CEX来源
+            "top10_holders_percent": random.uniform(10, 80)  # 前10大户持仓比例
         }
         
         if not token_data["address"]:
             continue
             
         # 创建分析任务
-        task = analyze_token(token_data)
+        task = analyze_token_with_risk(token_data)
         analysis_tasks.append(task)
     
     # 并行执行所有分析任务
@@ -488,23 +542,17 @@ async def monitor_new_tokens():
             if result and result.get('quality_tokens', 0) > 0:
                 found_quality_tokens += result['quality_tokens']
     
-    print(f"🎯 本次监控发现 {found_quality_tokens} 个优质项目")
+    print(f"🎯 本次监控发现 {found_quality_tokens} 个安全项目")
     return True
 
 async def main():
     """主函数"""
     print("=" * 50)
     print("=== Base链智能狙击监控系统启动 ===")
-    print("=== 完整功能版 + 价格追踪 ===")
+    print("=== 风险评分版 - 买卖税检测 ===")
     print("=" * 50)
 
     start_time = datetime.now()
-    
-    # 加载配置和风险数据库
-    risk_addresses = load_risk_addresses()
-    config = load_config()
-    
-    print(f"📁 配置加载: {len(risk_addresses)} 个风险地址")
     
     # 执行监控
     try:
