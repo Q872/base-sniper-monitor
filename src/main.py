@@ -542,7 +542,7 @@ async def analyze_and_maybe_push(pair: Dict[str, Any], session: aiohttp.ClientSe
         current_multiple = returns.get("price_multiple", 1)
         next_multiple = math.floor(current_multiple) + 1
         targets = [m for m in range(2, next_multiple + 1) if current_multiple >= m]
-        for m in targets:
+        for m in targets:verified_text
             if alert_manager.should_send_price(addr, m):
                 price_msg = (f"🚀 <b>涨幅通知</b>\n"
                              f"{name} ({symbol}) 已达到 {m-1} 倍上涨 ({current_multiple:.2f}x)\n"
@@ -575,9 +575,7 @@ async def analyze_and_maybe_push(pair: Dict[str, Any], session: aiohttp.ClientSe
     reasons_text = "\n".join([f"- {r}" for r in scorer.reasons]) if scorer.reasons else "无明显高风险"
            msg = (f"🟢 <b>新代币检测（非高危）</b>\n"
            verified_text = "✅ 开源" if token_meta.get("is_verified_source") else "❌ 未开源"
-           # 如果 msg 已经是单个长字符串，可以在发送前把开源行追加进去：
            msg = msg + f"\n开源状态: {verified_text}"
-
            f"{name} ({symbol})\n"
            f"流动性: ${liq:,.2f}\n"
            f"24h 量: ${meta.get('volume_24h',0):,.0f}\n"
