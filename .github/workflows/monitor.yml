@@ -1,46 +1,37 @@
-name: Base链监控
+name: Base Sniper Monitor
 
 on:
   schedule:
-    - cron: '*/8 * * * *'  # 每8分钟
-  workflow_dispatch:        # 手动触发
+    - cron: '*/5 * * * *'   # 每5分钟执行一次
+  workflow_dispatch:
 
 jobs:
   monitor:
     runs-on: ubuntu-latest
-    timeout-minutes: 5
-    
+    env:
+      # 把仓库 Secrets 注入环境变量
+      BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+      CHANNEL_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+      BASESCAN_API_KEY: ${{ secrets.BASESCAN_API_KEY }}   # 如果有则启用
+      MIN_LIQUIDITY_USD: ${{ secrets.MIN_LIQUIDITY_USD }} # 可选
     steps:
-      - name: 检出代码
-        uses: actions/checkout@v4
-        
-      - name: 设置Python环境
+      - name: Checkout
+        uses: actions/checkout@v3
+
+      - name: Set up Python
         uses: actions/setup-python@v4
         with:
           python-version: '3.9'
-          
-      - name: 验证Secrets配置
+
+      - name: Install dependencies
         run: |
-          echo "验证Telegram Secrets配置:"
-          if [ -n "$TELEGRAM_BOT_TOKEN" ]; then
-            echo "✅ TELEGRAM_BOT_TOKEN 已设置"
-          else
-            echo "❌ TELEGRAM_BOT_TOKEN 未设置"
-          fi
-          if [ -n "$TELEGRAM_CHAT_ID" ]; then
-            echo "✅ TELEGRAM_CHAT_ID 已设置"
-          else
-            echo "❌ TELEGRAM_CHAT_ID 未设置"
-          fi
-        env:
-          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
-          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
-          
-      - name: 安装依赖
-        run: pip install -r requirements.txt
-        
-      - name: 运行监控
-        env:
-          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
-          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Verify env presence
+        run: |
+          echo "BOT_TOKEN is set: ${BOT_TOKEN:+yes}"
+          echo "CHANNEL_ID is set: ${CHANNEL_ID:+yes}"
+
+      - name: Run monitor
         run: python src/main.py
