@@ -443,21 +443,13 @@ def parse_pair_to_meta(pair: Dict[str, Any]) -> Dict[str, Any]:
         meta["website"] = info.get("websites", [None])[0] if info.get("websites") else None
         meta["telegram"] = info.get("telegram", None)
     return meta
- # 检测合约是否开源
-try:
-    token_meta["is_verified_source"] = await check_verified_source(session, addr)
-except Exception as e:
-    Logger.warn(f"Source verify failed for {addr}: {e}")
-    token_meta["is_verified_source"] = False
-
-
 # ---------------------------
 # analyze single pair and push if allowed
 # ---------------------------
 async def analyze_and_maybe_push(pair: Dict[str, Any], session: aiohttp.ClientSession, dex_client: DexScreenerClient, creator_analyzer: CreatorAnalyzer, scorer: RiskScorer):
     meta = parse_pair_to_meta(pair)
- # --- 工具函数：Basescan 开源检测 ---
-async def check_verified_source(session: aiohttp.ClientSession, addr: str) -> bool:
+    # --- 工具函数：Basescan 开源检测 ---
+    async def check_verified_source(session: aiohttp.ClientSession, addr: str) -> bool:
     url = f"https://api.basescan.org/api?module=contract&action=getsourcecode&address={addr}"
     try:
         async with session.get(url, timeout=aiohttp.ClientTimeout(total=8)) as resp:
@@ -508,6 +500,12 @@ async def check_verified_source(session: aiohttp.ClientSession, addr: str) -> bo
         "has_community": bool(meta.get("telegram") or meta.get("website")),
         "from_cex": False
     }
+    # 检查合约是否开源
+    try:
+        token_meta["is_verified_source"] = await check_verified_source(session, addr)
+    except Exception as e:
+        Logger.warn(f"Source verify failed for {addr}: {e}")
+        token_meta["is_verified_source"] = False
 
     creator_addr = meta.get("pair_address") or addr
     creator_meta = creator_analyzer.analyze_creator(creator_addr)
