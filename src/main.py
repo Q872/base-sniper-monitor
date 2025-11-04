@@ -22,7 +22,7 @@ import math
 import traceback
 import asyncio
 import aiohttp
-import request
+import requests
 from datetime import datetime, timedelta
 from typing import Dict, List, Any, Optional
 
@@ -443,12 +443,31 @@ def parse_pair_to_meta(pair: Dict[str, Any]) -> Dict[str, Any]:
         meta["website"] = info.get("websites", [None])[0] if info.get("websites") else None
         meta["telegram"] = info.get("telegram", None)
     return meta
+ # 检测合约是否开源
+try:
+    token_meta["is_verified_source"] = await check_verified_source(session, addr)
+except Exception as e:
+    Logger.warn(f"Source verify failed for {addr}: {e}")
+    token_meta["is_verified_source"] = False
+
 
 # ---------------------------
 # analyze single pair and push if allowed
 # ---------------------------
 async def analyze_and_maybe_push(pair: Dict[str, Any], session: aiohttp.ClientSession, dex_client: DexScreenerClient, creator_analyzer: CreatorAnalyzer, scorer: RiskScorer):
     meta = parse_pair_to_meta(pair)
+ # --- 工具函数：Basescan 开源检测 ---
+async def check_verified_source(session: aiohttp.ClientSession, addr: str) -> bool:
+    url = f"https://api.basescan.org/api?module=contract&action=getsourcecode&address={addr}"
+    try:
+        async with session.get(url, timeout=aiohttp.ClientTimeout(total=8)) as resp:
+            data = await resp.json()
+            if "result" in data and data["result"]:
+                source = data["result"][0]
+                return bool(source.get("SourceCode"))
+    except Exception as e:
+        Logger.warn(f"check_verified_source error {addr}: {e}")
+    return False
     addr = meta["address"]
     symbol = meta["symbol"]
     name = meta["name"]
@@ -502,28 +521,14 @@ async def analyze_and_maybe_push(pair: Dict[str, Any], session: aiohttp.ClientSe
         current_multiple = returns.get("price_multiple", 1)
         next_multiple = math.floor(current_multiple) + 1
         targets = [m for m in range(2, next_multiple + 1) if current_multiple >= m]
-        for m in targets:verified_text
+        for m in targets:
             if alert_manager.should_send_price(addr, m):
                 price_msg = (f"🚀 <b>涨幅通知</b>\n"
                              f"{name} ({symbol}) 已达到 {m-1} 倍上涨 ({current_multiple:.2f}x)\n"
                              f"初始价: {returns.get('initial_price')}  当前价: {returns.get('current_price')}\n"
                              f"流动性: ${liq:,.2f}\n"
                              f"合约: <code>{addr}</code>\n")
-                await send_telegram_async(session, price_msg)
-                async def send_telegram_async(session: aiohttp.ClientSession, text: str):
-    api = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
-    payload = {"chat_id": TELEGRAM_CHAT_ID, "text": text, "parse_mode": "HTML", "disable_web_page_preview": True}
-    try:
-        async with session.post(api, json=payload, timeout=aiohttp.ClientTimeout(total=10)) as resp:
-            if resp.status != 200:
-                txt = await resp.text()
-                Logger.warn(f"Telegram API returned {resp.status}: {txt}")
-                return False
-            return True
-    except Exception as e:
-        Logger.warn(f"Telegram send error: {e}")
-        return False
-
+                await send_telegram_async(session, price_msg      
                 alert_manager.mark_price(addr, m)
 
     # Should push? only if score < HIGH_RISK_THRESHOLD and liquidity >= MIN_LIQUIDITY_USD
@@ -533,20 +538,20 @@ async def analyze_and_maybe_push(pair: Dict[str, Any], session: aiohttp.ClientSe
         return {"pushed": False, "score": score}
 
     reasons_text = "\n".join([f"- {r}" for r in scorer.reasons]) if scorer.reasons else "无明显高风险"
-           msg = (f"🟢 <b>新代币检测（非高危）</b>\n"
-           verified_text = "✅ 开源" if token_meta.get("is_verified_source") else "❌ 未开源"
-           msg = msg + f"\n开源状态: {verified_text}"
-           f"{name} ({symbol})\n"
-           f"流动性: ${liq:,.2f}\n"
-           f"24h 量: ${meta.get('volume_24h',0):,.0f}\n"
-           f"风险评分: {score} ({'优质' if score<=LOW_RISK_THRESHOLD else '中风险'})\n"
-           f"风险因素:\n{reasons_text}\n"
-           f"创建者地址: <code>{creator_addr}</code>\n"
-           f"创建者余额: {creator_meta.get('eth_balance')}\n"
-           f"创建者撤池/历史: {'是' if creator_meta.get('has_rug_history') else '否'}\n"
-           f"合约: <code>{addr}</code>\n"
-           f"更多: {meta.get('website') or meta.get('telegram') or ''}\n"
-           f"时间(UTC): {datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S')}")
+    verified_text = "✅ 开源" if token_meta.get("is_verified_source") else "❌ 未开源"
+    msg = (f"🟢 <b>新代币检测（非高危）</b>\n"
+       f"{name} ({symbol})\n"
+       f"开源状态: {verified_text}\n"
+       f"流动性: ${liq:,.2f}\n"
+       f"24h 量: ${meta.get('volume_24h',0):,.0f}\n"
+       f"风险评分: {score} ({'优质' if score<=LOW_RISK_THRESHOLD else '中风险'})\n"
+       f"风险因素:\n{reasons_text}\n"
+       f"创建者地址: <code>{creator_addr}</code>\n"
+       f"创建者余额: {creator_meta.get('eth_balance')}\n"
+       f"创建者撤池/历史: {'是' if creator_meta.get('has_rug_history') else '否'}\n"
+       f"合约: <code>{addr}</code>\n"
+       f"更多: {meta.get('website') or meta.get('telegram') or ''}\n"
+       f"时间(UTC): {datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S')}")
     await send_telegram_async(session, msg)
     Logger.info(f"Pushed token {symbol} ({addr}) to Telegram")
     return {"pushed": True, "score": score}
