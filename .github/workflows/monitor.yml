@@ -1,32 +1,43 @@
-name: Base MEME Monitor
+name: 运行 base-sniper-monitor
 
 on:
+  push:
+    branches: [ main ]
   workflow_dispatch:
-  schedule:
-    - cron: "*/5 * * * *"   # 每5分钟运行一次（可调）
 
 jobs:
-  run-bot:
+  run-monitor:
     runs-on: ubuntu-latest
-
-    env:
-      TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
-      TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
-
     steps:
-      - name: Checkout repository
+      # 必须先检出仓库
+      - name: 检出仓库
         uses: actions/checkout@v4
 
-      - name: Set up Python
-        uses: actions/setup-python@v5
+      # 设置 Python 环境
+      - name: 设置 Python
+        uses: actions/setup-python@v4
         with:
-          python-version: "3.11"
+          python-version: '3.11'
 
-      - name: Install dependencies
+      # --- 调试步骤：查看当前目录和查找 main.py ---
+      - name: 显示当前目录与仓库根文件列表
         run: |
-          python -m pip install --upgrade pip
-          pip install aiohttp requests
+          pwd
+          ls -la
 
-      - name: Run monitor bot
+      - name: 递归查找 main.py（帮助确认文件在哪个目录）
         run: |
-          python main.py
+          echo "----- 查找 main.py -----"
+          find . -type f -name "main.py" -print || true
+
+      # -------------------------
+      # 方法 1：显式路径运行（推荐简单直接）
+      # 说明：如果 main.py 在 scr 目录下，用下面这行运行
+      - name: 运行 main.py（显式路径）
+        run: python ./scr/main.py
+
+      # 方法 2：使用 working-directory（把工作目录切换到 scr）
+      # 如果你更喜欢把整个步骤的工作目录设为 scr，取消下面步骤的注释并注释上面的“显式路径运行”步骤
+      # - name: 运行 main.py（working-directory）
+      #   working-directory: ./scr
+      #   run: python main.py
