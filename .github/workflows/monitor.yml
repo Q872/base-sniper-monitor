@@ -33,5 +33,6 @@ jobs:
           echo "BOT_TOKEN is set: ${BOT_TOKEN:+yes}"
           echo "CHANNEL_ID is set: ${CHANNEL_ID:+yes}"
 
-      - name: Run monitor
-        run: python src/main.py
+     - name: Run bot
+       run: python3 src/main.py
+
