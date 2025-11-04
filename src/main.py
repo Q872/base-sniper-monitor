@@ -22,47 +22,7 @@ import math
 import traceback
 import asyncio
 import aiohttp
-import requests
-# ---------- Paste: 检测合约是否开源 ----------
-import os
-import requests
-
-BASESCAN_API_KEY = os.getenv("BASESCAN_API_KEY", "")  # 建议放到 GitHub Secrets
-
-def is_verified_source(address: str) -> bool:
-    """
-    调用 Basescan API 检查合约是否已验证（即开源）。
-    返回 True 表示该地址合约已开源。
-    """
-    try:
-        url = "https://api.basescan.org/api"
-        params = {
-            "module": "contract",
-            "action": "getsourcecode",
-            "address": address,
-            "apikey": BASESCAN_API_KEY
-        }
-        r = requests.get(url, params=params, timeout=10)
-        if r.status_code != 200:
-            print(f"⚠️ Basescan API 请求失败: {r.status_code}")
-            return False
-
-        data = r.json()
-        result = data.get("result")
-        if not result or not isinstance(result, list):
-            return False
-
-        # 检查返回数据中 SourceCode 字段是否非空
-        source_code = result[0].get("SourceCode", "")
-        if source_code and source_code.strip():
-            return True
-        return False
-
-    except Exception as e:
-        print(f"⚠️ 检测开源状态异常: {e}")
-        return False
-# ---------- End ----------
-
+import request
 from datetime import datetime, timedelta
 from typing import Dict, List, Any, Optional
 
