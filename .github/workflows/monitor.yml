@@ -1,38 +1,32 @@
-name: Base Sniper Monitor
+name: Base MEME Monitor
 
 on:
-  schedule:
-    - cron: '*/5 * * * *'   # 每5分钟执行一次
   workflow_dispatch:
+  schedule:
+    - cron: "*/5 * * * *"   # 每5分钟运行一次（可调）
 
 jobs:
-  monitor:
+  run-bot:
     runs-on: ubuntu-latest
+
     env:
-      # 把仓库 Secrets 注入环境变量
-      BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
-      CHANNEL_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
-      BASESCAN_API_KEY: ${{ secrets.BASESCAN_API_KEY }}   # 如果有则启用
-      MIN_LIQUIDITY_USD: ${{ secrets.MIN_LIQUIDITY_USD }} # 可选
+      TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+      TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+
     steps:
-      - name: Checkout
-        uses: actions/checkout@v3
+      - name: Checkout repository
+        uses: actions/checkout@v4
 
       - name: Set up Python
-        uses: actions/setup-python@v4
+        uses: actions/setup-python@v5
         with:
-          python-version: '3.9'
+          python-version: "3.11"
 
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install -r requirements.txt
+          pip install aiohttp requests
 
-      - name: Verify env presence
+      - name: Run monitor bot
         run: |
-          echo "BOT_TOKEN is set: ${BOT_TOKEN:+yes}"
-          echo "CHANNEL_ID is set: ${CHANNEL_ID:+yes}"
-
-     - name: Run bot
-       run: python3 src/main.py
-
+          python main.py
