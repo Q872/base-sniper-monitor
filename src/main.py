@@ -195,7 +195,7 @@ class AlertManager:
         data_manager.mark_price_alert(address, multiple)
 
 alert_manager = AlertManager()
-
+# --- 工具函数：Basescan 开源检测 ---
 # ---------------------------
 # DexScreener client (async)
 # ---------------------------
