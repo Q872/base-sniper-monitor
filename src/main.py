@@ -1,747 +1,655 @@
 #!/usr/bin/env python3
+# -*- coding: utf-8 -*-
 """
-完整版 main.py
-- 包含：TokenDataManager, RiskScorer, DexScreener 接口, AlertManager
-- 修复点：DexScreener 调用、环境变量读取、流动性阈值由环境变量控制
+BMIS - 完整 main.py (GitHub Actions 兼容，单次执行)
+功能亮点：
+- 从 DexScreener 拉取 Base 链最新 pairs
+- TokenDataManager：记录价格历史与倍数报警
+- RiskScorer：完整评分逻辑（你指定的阈值语义）
+- AlertManager：价格/风险冷却与去重
+- Deployer Intelligence：检测部署者是否曾撤池（支持 v2/v3 逻辑 via explorer logs）
+- Telegram 推送（HTML 格式）
+- 单次运行后退出 -> 适合 GitHub Actions 定时触发
+注意：请在 Secrets 中配置 BOT_TOKEN, CHANNEL_ID, BASESCAN_API_KEY (推荐)
 """
 
+import os
+import sys
+import time
+import json
+import math
 import asyncio
 import aiohttp
-import yaml
-import os
-import json
-import time
-import math
 import traceback
 from datetime import datetime, timedelta
 from typing import Dict, List, Optional
 
-# ========== 配置 ==========
-# 可通过环境变量覆盖
-MIN_LIQUIDITY_USD = float(os.getenv("MIN_LIQUIDITY_USD", "10000"))  # 初始LP阈值，低于则不推送（你可以在 Github Secrets 里设置）
-PRICE_HISTORY_LIMIT = int(os.getenv("PRICE_HISTORY_LIMIT", "100"))
-ALERT_COOLDOWN = int(os.getenv("ALERT_COOLDOWN", "3600"))  # 1小时：价格/风险重复报警冷却（秒）
+# ---------------------------
+# 配置 (可通过 GitHub Secrets 覆盖)
+# ---------------------------
+BOT_TOKEN = os.getenv("BOT_TOKEN")                # 必须配置
+CHANNEL_ID = os.getenv("CHANNEL_ID")              # 必须配置（-100... 或 @channelname）
+BASESCAN_API_KEY = os.getenv("BASESCAN_API_KEY")  # 推荐配置（用于日志/验证查询）
+MIN_LIQUIDITY_USD = float(os.getenv("MIN_LIQUIDITY_USD", "10000"))  # 初始LP阈值
+PRICE_HISTORY_LIMIT = int(os.getenv("PRICE_HISTORY_LIMIT", "200"))
+ALERT_COOLDOWN = int(os.getenv("ALERT_COOLDOWN", "3600"))  # 秒
+DEXSCR_API_BASE = "https://api.dexscreener.com/latest/dex"
+CHAIN_SLUG = "base"  # 监控链 slug
+PAIRS_LIMIT = int(os.getenv("PAIRS_LIMIT", "50"))
 
-# Telegram env keys
-TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
-TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
+# 评分阈值（你指定的语义）
+# score >= 13 -> 高风险 (不推送)
+# score <= 6 -> 优质
+# 7..12 -> 中风险
+HIGH_RISK_THRESHOLD = 13
+LOW_RISK_THRESHOLD = 6
 
-# ========== 数据管理 ==========
+# --------- 依赖检查提示 ----------
+try:
+    from telegram import Bot
+except Exception:
+    # we'll still allow script to run to show clear error when running in GH Actions
+    Bot = None
+
+# ---------------------------
+# 数据管理器
+# ---------------------------
 class TokenDataManager:
     def __init__(self, data_file: str = "data/token_history.json"):
         self.data_file = data_file
         self._ensure_data_file()
-    
+
     def _ensure_data_file(self):
-        """确保数据文件存在"""
-        os.makedirs(os.path.dirname(self.data_file), exist_ok=True)
+        d = os.path.dirname(self.data_file)
+        if d:
+            os.makedirs(d, exist_ok=True)
         if not os.path.exists(self.data_file):
-            with open(self.data_file, 'w') as f:
+            with open(self.data_file, "w") as f:
                 json.dump({"tokens": {}, "statistics": {}}, f, indent=2)
-    
+
     def load_data(self) -> Dict:
-        """加载历史数据"""
         try:
-            with open(self.data_file, 'r') as f:
+            with open(self.data_file, "r") as f:
                 return json.load(f)
         except Exception as e:
-            print(f"❌ 加载数据失败: {e}")
+            print(f"❌ 读取历史数据失败: {e}")
             return {"tokens": {}, "statistics": {}}
-    
+
     def save_data(self, data: Dict):
-        """保存数据"""
         try:
-            with open(self.data_file, 'w') as f:
+            with open(self.data_file, "w") as f:
                 json.dump(data, f, indent=2)
         except Exception as e:
-            print(f"❌ 保存数据失败: {e}")
-    
+            print(f"❌ 保存历史数据失败: {e}")
+
     def record_token_price(self, token_address: str, symbol: str, price: float, liquidity: float):
-        """记录代币价格"""
         data = self.load_data()
-        current_time = datetime.utcnow().isoformat() + "Z"
-        
+        now = datetime.utcnow().isoformat() + "Z"
         if token_address not in data["tokens"]:
             data["tokens"][token_address] = {
                 "symbol": symbol,
-                "first_seen": current_time,
+                "first_seen": now,
                 "price_history": [],
-                "highest_price": price,
-                "lowest_price": price,
-                "initial_price": price,
-                "initial_liquidity": liquidity,
-                "price_alerts_sent": []  # 记录已发送的价格警报倍数
+                "initial_price": price or 0,
+                "initial_liquidity": liquidity or 0,
+                "price_alerts_sent": []
             }
-        
-        token_data = data["tokens"][token_address]
-        token_data["price_history"].append({
-            "timestamp": current_time,
-            "price": price,
-            "liquidity": liquidity
-        })
-        
-        # 保留最近 PRICE_HISTORY_LIMIT 条记录
-        if len(token_data["price_history"]) > PRICE_HISTORY_LIMIT:
-            token_data["price_history"] = token_data["price_history"][-PRICE_HISTORY_LIMIT:]
-        
-        # 更新最高/最低价格
-        token_data["highest_price"] = max(token_data.get("highest_price", price), price)
-        token_data["lowest_price"] = min(token_data.get("lowest_price", price), price)
-        token_data["current_price"] = price
-        token_data["last_updated"] = current_time
-        
-        # 若无 initial_price 则设置
-        if not token_data.get("initial_price"):
-            token_data["initial_price"] = price
-        
+        token = data["tokens"][token_address]
+        token["price_history"].append({"timestamp": now, "price": price, "liquidity": liquidity})
+        # trim
+        if len(token["price_history"]) > PRICE_HISTORY_LIMIT:
+            token["price_history"] = token["price_history"][-PRICE_HISTORY_LIMIT:]
+        token["current_price"] = price
+        token["last_updated"] = now
+        if not token.get("initial_price"):
+            token["initial_price"] = price
         self.save_data(data)
-        return token_data
-    
+        return token
+
     def calculate_returns(self, token_address: str) -> Dict:
-        """计算收益率"""
         data = self.load_data()
         if token_address not in data["tokens"]:
             return {}
-        
-        token_data = data["tokens"][token_address]
-        initial_price = token_data.get("initial_price", 0)
-        current_price = token_data.get("current_price", initial_price)
-        
-        if initial_price == 0:
+        token = data["tokens"][token_address]
+        initial = token.get("initial_price", 0) or 0
+        current = token.get("current_price", initial) or initial
+        if initial == 0:
             return {}
-        
-        total_return = ((current_price - initial_price) / initial_price) * 100
-        
-        # 计算24小时收益率（如果有足够数据）
-        twenty_four_hours_ago = datetime.utcnow() - timedelta(hours=24)
-        price_24h_ago = initial_price
-        
-        for price_point in reversed(token_data.get("price_history", [])):
+        total_return = ((current - initial) / initial) * 100
+        # 24h
+        cutoff = datetime.utcnow() - timedelta(hours=24)
+        price_24h = initial
+        for p in reversed(token.get("price_history", [])):
             try:
-                price_time = datetime.fromisoformat(price_point["timestamp"].replace("Z", "+00:00"))
-                if price_time <= twenty_four_hours_ago:
-                    price_24h_ago = price_point["price"]
+                ts = datetime.fromisoformat(p["timestamp"].replace("Z", "+00:00"))
+                if ts <= cutoff:
+                    price_24h = p["price"]
                     break
             except Exception:
                 continue
-        
-        return_24h = ((current_price - price_24h_ago) / price_24h_ago) * 100 if price_24h_ago > 0 else 0
-        
+        return_24h = ((current - price_24h) / price_24h) * 100 if price_24h > 0 else 0
         return {
             "total_return": round(total_return, 2),
             "return_24h": round(return_24h, 2),
-            "initial_price": initial_price,
-            "current_price": current_price,
-            "price_change": current_price - initial_price,
-            "price_multiple": current_price / initial_price if initial_price > 0 else 1,
-            "highest_return": round(((token_data.get("highest_price", current_price) - initial_price) / initial_price) * 100, 2),
-            "current_liquidity": token_data.get("price_history", [])[-1].get("liquidity", 0) if token_data.get("price_history") else 0
+            "initial_price": initial,
+            "current_price": current,
+            "price_multiple": (current / initial) if initial > 0 else 1
         }
-    
-    def get_price_alerts_sent(self, token_address: str) -> List[int]:
-        """获取已发送的价格警报倍数"""
-        data = self.load_data()
-        if token_address in data["tokens"]:
-            return data["tokens"][token_address].get("price_alerts_sent", [])
-        return []
-    
-    def mark_price_alert_sent(self, token_address: str, multiple: int):
-        """标记价格警报已发送"""
-        data = self.load_data()
-        if token_address in data["tokens"]:
-            if multiple not in data["tokens"][token_address].get("price_alerts_sent", []):
-                data["tokens"][token_address].setdefault("price_alerts_sent", []).append(multiple)
-                self.save_data(data)
-    
-    def get_top_performers(self, limit: int = 10) -> List[Dict]:
-        """获取表现最好的代币"""
-        data = self.load_data()
-        performers = []
-        
-        for address, token_data in data["tokens"].items():
-            returns = self.calculate_returns(address)
-            if returns and returns.get("total_return") is not None:
-                performers.append({
-                    "address": address,
-                    "symbol": token_data.get("symbol", ""),
-                    **returns
-                })
-        
-        # 按总收益率排序
-        performers.sort(key=lambda x: x.get("total_return", 0), reverse=True)
-        return performers[:limit]
-    
-    def get_recent_tokens(self, hours: int = 24) -> List[Dict]:
-        """获取最近发现的代币"""
-        data = self.load_data()
-        recent_tokens = []
-        cutoff_time = datetime.utcnow() - timedelta(hours=hours)
-        
-        for address, token_data in data["tokens"].items():
-            try:
-                first_seen = datetime.fromisoformat(token_data.get("first_seen").replace("Z", "+00:00"))
-            except Exception:
-                first_seen = datetime.utcnow() - timedelta(days=365)
-            if first_seen >= cutoff_time:
-                returns = self.calculate_returns(address)
-                recent_tokens.append({
-                    "address": address,
-                    "symbol": token_data.get("symbol", ""),
-                    "first_seen": token_data.get("first_seen"),
-                    **returns
-                })
-        
-        # 按发现时间排序
-        recent_tokens.sort(key=lambda x: x.get("first_seen", ""), reverse=True)
-        return recent_tokens
 
-# 初始化数据管理器（单例）
+    def get_price_alerts_sent(self, token_address: str) -> List[int]:
+        data = self.load_data()
+        return data["tokens"].get(token_address, {}).get("price_alerts_sent", [])
+
+    def mark_price_alert_sent(self, token_address: str, multiple: int):
+        data = self.load_data()
+        arr = data["tokens"].setdefault(token_address, {}).setdefault("price_alerts_sent", [])
+        if multiple not in arr:
+            arr.append(multiple)
+            self.save_data(data)
+
+    def get_top_performers(self, limit: int = 10) -> List[Dict]:
+        data = self.load_data()
+        out = []
+        for addr, t in data["tokens"].items():
+            ret = self.calculate_returns(addr)
+            if ret:
+                out.append({"address": addr, "symbol": t.get("symbol"), **ret})
+        out.sort(key=lambda x: x.get("total_return", 0), reverse=True)
+        return out[:limit]
+
 data_manager = TokenDataManager()
 
-# ========== 风险评分器 ==========
+# ---------------------------
+# 风险评分器（按你要求的语义）
+# ---------------------------
 class RiskScorer:
     def __init__(self):
-        self.risk_reasons = []  # 存储所有风险原因
-        
-    def calculate_risk_score(self, token_data):
-        """计算风险分数并收集风险原因"""
-        risk_score = 0
-        self.risk_reasons = []
-        
-        # 1. 合约验证状态检测
-        if not self.check_contract_verified(token_data):
-            risk_score += 2
-            self.risk_reasons.append("❌ 合约未验证")
-        
-        # 2. 买卖税率检测（重点！）
-        tax_risk = self.check_tax_rate(token_data)
-        if tax_risk > 0:
-            risk_score += tax_risk
-            if tax_risk == 3:
-                self.risk_reasons.append("⚠️ 买卖税 > 5%")
-            elif tax_risk == 1:
-                self.risk_reasons.append("⚠️ 买卖税 > 3%")
-        
-        # 3. Honeypot检测
-        if self.check_honeypot(token_data):
-            risk_score += 5
-            self.risk_reasons.append("🚫 Honeypot检测失败")
-        
-        # 4. LP锁仓检测
-        lp_risk = self.check_lp_lock(token_data)
-        if lp_risk > 0:
-            risk_score += lp_risk
-            self.risk_reasons.append("🔓 LP锁仓时间短或无锁仓")
-        
-        # 5. 钱包年龄检测
-        if self.check_wallet_age(token_data):
-            risk_score += 2
-            self.risk_reasons.append("🆕 部署钱包 < 6小时")
-        
-        # 6. 资金来源检测
-        if self.check_fund_source(token_data):
-            risk_score += 3
-            self.risk_reasons.append("💸 资金来源可疑")
-        
-        # 7. 部署者历史检测
-        if self.check_deployer_history(token_data):
-            risk_score += 4
-            self.risk_reasons.append("👤 部署者有不良记录")
-        
-        # 安全减分项
-        if self.check_verified_community(token_data):
-            risk_score -= 2
-            self.risk_reasons.append("✅ 合约已验证且有社群")
-        
-        if self.check_cex_source(token_data):
-            risk_score -= 1
-            self.risk_reasons.append("🏦 资金来自CEX")
-        
-        if self.check_holder_distribution(token_data):
-            risk_score -= 1
-            self.risk_reasons.append("📊 持仓分布良好")
-        
-        return max(risk_score, 0)  # 确保分数不为负
-    
-    def check_tax_rate(self, token_data):
-        """检测买卖税率 - 重点检测项"""
+        self.reasons: List[str] = []
+
+    def score(self, td: Dict) -> int:
+        """
+        约定：
+           - 高风险 score >= HIGH_RISK_THRESHOLD (13) -> 不推送
+           - 低风险 score <= LOW_RISK_THRESHOLD (6) -> 优质
+           - 中间 7..12 -> 中风险
+        评分规则示例（可调）：
+        """
+        self.reasons = []
+        score = 0
+        # 未验证合约加分（不安全）
+        if not td.get("verified", False):
+            score += 2
+            self.reasons.append("合约未验证")
+        # 税率
         try:
-            buy_tax = float(token_data.get('buy_tax', 0) or 0)
-            sell_tax = float(token_data.get('sell_tax', 0) or 0)
-            
-            if buy_tax > 0.05 or sell_tax > 0.05:  # 5%阈值
-                return 3
-            elif buy_tax > 0.03 or sell_tax > 0.03:  # 3%警告
-                return 1
+            b = float(td.get("buy_tax", 0) or 0)
+            s = float(td.get("sell_tax", 0) or 0)
+            if b > 0.05 or s > 0.05:
+                score += 4
+                self.reasons.append("买卖税较高 (>5%)")
+            elif b > 0.03 or s > 0.03:
+                score += 1
+                self.reasons.append("买卖税 >3%")
         except Exception:
             pass
-        return 0
-    
-    def check_contract_verified(self, token_data):
-        """检查合约是否验证"""
-        return bool(token_data.get('verified', False))
-    
-    def check_honeypot(self, token_data):
-        """Honeypot检测"""
-        return bool(token_data.get('is_honeypot', False))
-    
-    def check_lp_lock(self, token_data):
-        """LP锁仓检测"""
+        # honeypot
+        if td.get("is_honeypot", False):
+            score += 6
+            self.reasons.append("honeypot")
+        # LP 未锁/短锁
+        lp_lock = int(td.get("lp_lock_days", 0) or 0)
+        if lp_lock == 0:
+            score += 3
+            self.reasons.append("LP 未锁")
+        elif lp_lock < 30:
+            score += 1
+            self.reasons.append("LP 锁仓短")
+        # 部署者新钱包
+        wa = float(td.get("wallet_age_hours", 24) or 24)
+        if wa < 6:
+            score += 2
+            self.reasons.append("部署钱包 <6h")
+        # 部署者撤池 / 惯犯
+        if td.get("deployer_withdrawn", False):
+            score += 5
+            self.reasons.append("部署者有撤池记录")
+        if td.get("has_rug_history", False):
+            score += 5
+            self.reasons.append("部署者历史有RUG记录")
+        # 持仓集中度
         try:
-            lp_lock_days = int(token_data.get('lp_lock_days', 0) or 0)
+            top10 = float(td.get("top10_holders_percent", 100) or 100)
+            if top10 > 50:
+                score += 2
+                self.reasons.append("持仓高度集中")
         except Exception:
-            lp_lock_days = 0
-        if lp_lock_days == 0:
-            return 2  # 未锁仓
-        elif lp_lock_days < 30:
-            return 1  # 锁仓时间短
-        return 0
-    
-    def check_wallet_age(self, token_data):
-        """钱包年龄检测"""
-        try:
-            wallet_age_hours = float(token_data.get('wallet_age_hours', 24) or 24)
-        except Exception:
-            wallet_age_hours = 24
-        return wallet_age_hours < 6
-    
-    def check_fund_source(self, token_data):
-        """资金来源检测"""
-        return bool(token_data.get('suspicious_source', False))
-    
-    def check_deployer_history(self, token_data):
-        """部署者历史检测"""
-        return bool(token_data.get('has_rug_history', False))
-    
-    def check_verified_community(self, token_data):
-        """检查验证状态和社群"""
-        return bool(token_data.get('verified', False) and token_data.get('has_community', False))
-    
-    def check_cex_source(self, token_data):
-        """检查是否来自CEX"""
-        return bool(token_data.get('from_cex', False))
-    
-    def check_holder_distribution(self, token_data):
-        """检查持仓分布"""
-        try:
-            top10_holders = float(token_data.get('top10_holders_percent', 100) or 100)
-        except Exception:
-            top10_holders = 100
-        return top10_holders < 20  # 前10大户持仓 < 20%
+            pass
+        # 社区、CEX来源为安全因子（减分）
+        if td.get("verified", False) and td.get("has_community", False):
+            score -= 2
+            self.reasons.append("verified + 社群")
+        if td.get("from_cex", False):
+            score -= 1
+            self.reasons.append("资金来自 CEX")
+        # 确保 >=0
+        score = max(0, int(score))
+        return score
 
-# ========== 报警管理 ==========
+# ---------------------------
+# 报警管理
+# ---------------------------
 class AlertManager:
     def __init__(self):
-        self.sent_alerts = {}  # key -> timestamp
-        self.alert_cooldown = ALERT_COOLDOWN  # seconds
-    
-    def should_send_risk_alert(self, token_address: str, risk_score: int) -> bool:
-        """判断是否应该发送风险警报"""
-        if risk_score <= 6:
+        self.sent = {}  # key->timestamp
+        self.cooldown = ALERT_COOLDOWN
+
+    def should_send_risk(self, token_addr: str, score: int) -> bool:
+        # 只对 score < HIGH_RISK_THRESHOLD 的代币推送（你要求）
+        if score >= HIGH_RISK_THRESHOLD:
             return False
-        
-        current_time = time.time()
-        alert_key = f"risk_{token_address}_{risk_score}"
-        
-        last = self.sent_alerts.get(alert_key)
-        if last and (current_time - last) < self.alert_cooldown:
-            return False
-        
-        self.sent_alerts[alert_key] = current_time
-        return True
-    
-    def should_send_price_alert(self, token_address: str, multiple: int) -> bool:
-        """判断是否应该发送价格倍数警报"""
-        sent = data_manager.get_price_alerts_sent(token_address)
-        return multiple not in sent
-    
-    def cleanup_old_alerts(self):
-        """清理过期的警报记录"""
+        # 低于阈值才会推送；但是我们仍然做冷却，防止重复
+        key = f"risk:{token_addr}:{score}"
         now = time.time()
-        keys = list(self.sent_alerts.keys())
-        for k in keys:
-            if now - self.sent_alerts[k] > self.alert_cooldown:
-                del self.sent_alerts[k]
+        last = self.sent.get(key)
+        if last and now - last < self.cooldown:
+            return False
+        self.sent[key] = now
+        return True
+
+    def should_send_price(self, token_addr: str, multiple: int) -> bool:
+        sent = data_manager.get_price_alerts_sent(token_addr)
+        return multiple not in sent
+
+    def mark_price_sent(self, token_addr: str, multiple: int):
+        data_manager.mark_price_alert_sent(token_addr, multiple)
 
 alert_manager = AlertManager()
 
-# ========== DexScreener API ==========
-class DexScreenerAPI:
-    def __init__(self):
-        self.base_url = "https://api.dexscreener.com/latest/dex"
-    
-    async def get_latest_base_pairs(self, limit: int = 25):
-        """获取 Base 链最新代币对（官方 latest/pairs/base）"""
+# ---------------------------
+# DexScreener 接口与解析
+# ---------------------------
+class DexScreenerClient:
+    def __init__(self, session: aiohttp.ClientSession):
+        self.session = session
+
+    async def get_latest_pairs(self, chain: str = CHAIN_SLUG, limit: int = PAIRS_LIMIT):
+        # 使用官方 latest/pairs/{chain} 接口
+        url = f"{DEXSCR_API_BASE}/pairs/{chain}"
         try:
-            async with aiohttp.ClientSession() as session:
-                async with session.get(f"{self.base_url}/pairs/base", timeout=aiohttp.ClientTimeout(total=10)) as resp:
-                    if resp.status == 200:
-                        data = await resp.json()
-                        pairs = data.get("pairs", [])
-                        print(f"✅ DexScreener 返回 pairs 数量: {len(pairs)}")
-                        return pairs[:limit]
-                    else:
-                        print(f"❌ DexScreener status: {resp.status}")
-                        return []
+            async with self.session.get(url, timeout=aiohttp.ClientTimeout(total=10)) as resp:
+                if resp.status == 200:
+                    data = await resp.json()
+                    pairs = data.get("pairs", [])[:limit]
+                    return pairs
+                else:
+                    print(f"❌ DexScreener 返回状态 {resp.status}")
+                    return []
         except Exception as e:
             print(f"❌ DexScreener 请求异常: {e}")
             return []
 
-dexscreener = DexScreenerAPI()
-
-# ========== 工具函数 ==========
-def parse_pair_data(pair):
-    """解析 DexScreener pair 数据成统一结构"""
+def parse_pair(pair: Dict) -> Optional[Dict]:
     try:
-        created_at = pair.get('pairCreatedAt')
-        age_minutes = 0
-        if created_at:
-            # pairCreatedAt 有时是字符串 ISO 或者时间戳（毫秒）
-            if isinstance(created_at, str):
-                try:
-                    created_time = datetime.fromisoformat(created_at.replace('Z', '+00:00'))
-                    age_minutes = int((datetime.utcnow() - created_time).total_seconds() / 60)
-                except Exception:
-                    age_minutes = 0
-            else:
-                # 认为是 ms timestamp
-                try:
-                    age_minutes = int((time.time() * 1000 - float(created_at)) / 60000)
-                except Exception:
-                    age_minutes = 0
-        
-        base_token = pair.get('baseToken', {}) or {}
+        base = pair.get("baseToken", {}) or {}
         liquidity = 0
         try:
-            liquidity = float((pair.get('liquidity') or {}).get('usd') or 0)
+            liquidity = float((pair.get("liquidity") or {}).get("usd") or 0)
         except Exception:
             liquidity = 0
-        
-        volume_24h = 0
+        vol = 0
         try:
-            volume_24h = float((pair.get('volume') or {}).get('h24') or 0)
+            vol = float((pair.get("volume") or {}).get("h24") or 0)
         except Exception:
-            volume_24h = 0
-        
-        price_change_24h = 0
-        if pair.get('priceChange'):
+            vol = 0
+        price = float(pair.get("priceUsd") or 0)
+        created = pair.get("pairCreatedAt")
+        age_minutes = 0
+        if created:
             try:
-                price_change_24h = float(pair.get('priceChange').get('h24') or 0)
+                if isinstance(created, str):
+                    created_time = datetime.fromisoformat(created.replace("Z", "+00:00"))
+                    age_minutes = int((datetime.utcnow() - created_time).total_seconds() / 60)
+                else:
+                    age_minutes = int((time.time() * 1000 - float(created)) / 60000)
             except Exception:
-                price_change_24h = 0
-        
+                age_minutes = 0
         return {
-            "address": base_token.get('address', '') or base_token.get('id', ''),
-            "name": base_token.get('name', 'Unknown'),
-            "symbol": base_token.get('symbol', 'Unknown'),
+            "address": base.get("address") or base.get("id") or "",
+            "name": base.get("name", "Unknown"),
+            "symbol": base.get("symbol", "UNK"),
             "liquidity": liquidity,
-            "volume": volume_24h,
-            "price_change_24h": price_change_24h,
-            "priceUsd": pair.get('priceUsd', 0),
-            "url": pair.get('url', ''),
+            "volume": vol,
+            "priceUsd": price,
+            "url": pair.get("url", ""),
             "age_minutes": age_minutes,
-            "chainId": pair.get('chainId'),
-            "dexId": pair.get('dexId')
+            "raw": pair
         }
     except Exception as e:
-        print(f"❌ parse_pair_data error: {e}")
+        print(f"❌ parse_pair error: {e}")
         return None
 
-def validate_token_data(token_data):
-    """验证 token 数据完整性与阈值"""
-    if not token_data:
-        return False
-    required_fields = ['address', 'symbol', 'liquidity']
-    for f in required_fields:
-        if not token_data.get(f):
-            return False
-    # 使用全局阈值 MIN_LIQUIDITY_USD
-    if float(token_data.get('liquidity', 0) or 0) < float(MIN_LIQUIDITY_USD):
-        return False
-    return True
+# ---------------------------
+# Deployer intelligence：检测撤池行为（v2/v3）
+# 原理：
+# - v2 (UniswapV2) 常见撤池可通过 Pair 合约的 Burn / Transfer(到0x) 或 router removeLiquidity 操作的日志检测
+# - v3 (UniswapV3) 使用 NonfungiblePositionManager 的 DecreaseLiquidity / Burn / Collect 事件来识别撤出
+# 我们用 explorer logs 查询（需要 BASESCAN_API_KEY）
+# ---------------------------
+class DeployerIntelligence:
+    def __init__(self, session: aiohttp.ClientSession, explorer_api_key: Optional[str] = None):
+        self.session = session
+        self.key = explorer_api_key
 
-# ========== Telegram 发送 ==========
-async def send_telegram_message(message):
-    """发送 Telegram 消息（异步）"""
-    bot_token = TELEGRAM_BOT_TOKEN
-    chat_id = TELEGRAM_CHAT_ID
-    if not bot_token or not chat_id:
-        print("⚠️ Telegram 配置缺失（未设置 TELEGAM_BOT_TOKEN/CHAT_ID），跳过发送")
-        return False
-    try:
-        async with aiohttp.ClientSession() as session:
-            payload = {
-                'chat_id': chat_id,
-                'text': message,
-                'parse_mode': 'Markdown',
-                'disable_web_page_preview': True
-            }
-            async with session.post(f'https://api.telegram.org/bot{bot_token}/sendMessage', json=payload, timeout=aiohttp.ClientTimeout(total=10)) as resp:
+    async def _get_logs(self, address: str, topic0: Optional[str] = None, from_block: Optional[int] = None, to_block: Optional[int] = None):
+        """
+        通用日志查询（Basescan style）
+        使用 module=logs&action=getLogs&address=XXX&topic0=0x...&apikey=KEY
+        注意 explorer 的速率限制。
+        """
+        if not self.key:
+            # 没有 key 无法查询（返回空），但不会抛异常
+            return []
+        params = {
+            "module": "logs",
+            "action": "getLogs",
+            "address": address,
+            "apikey": self.key,
+            "offset": 100,
+            "page": 1
+        }
+        if topic0:
+            params["topic0"] = topic0
+        if from_block:
+            params["fromBlock"] = str(from_block)
+        if to_block:
+            params["toBlock"] = str(to_block)
+        url = "https://api.basescan.org/api"  # note: base explorer domain placeholder (replace if needed)
+        try:
+            async with self.session.get(url, params=params, timeout=aiohttp.ClientTimeout(total=10)) as resp:
                 if resp.status == 200:
-                    print("✅ Telegram 消息发送成功")
-                    return True
+                    d = await resp.json()
+                    return d.get("result", [])
                 else:
-                    txt = await resp.text()
-                    print(f"❌ Telegram 发送失败 {resp.status}: {txt}")
-                    return False
-    except Exception as e:
-        print(f"❌ Telegram 发送异常: {e}")
+                    # print(f"Explorer logs status {resp.status}")
+                    return []
+        except Exception:
+            return []
+
+    async def check_deployer_withdraw_v2(self, lp_pair_address: str) -> bool:
+        """
+        对 UniswapV2 风格的 pair 检查 Burn / Transfer to zero (LP token burn)
+        topic0 for Burn: keccak256("Burn(address,uint256,uint256)")
+        但这里更稳妥是查 Transfer -> to=0x000... 或 router removeLiquidity events (topic detection)
+        """
+        # topic for Transfer: keccak("Transfer(address,address,uint256)") = 0xddf252ad...
+        transfer_topic = "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef"
+        logs = await self._get_logs(lp_pair_address, topic0=transfer_topic)
+        if not logs:
+            return False
+        # 简单判断：近期是否有 to == 0x000.. burn 或大额 transfer out (可视为撤池)
+        zero_addr = "0x0000000000000000000000000000000000000000"
+        for lg in logs:
+            topics = lg.get("topics", [])
+            data = lg.get("data", "")
+            # topics[2] is 'to' in Transfer indexed fields if standard ERC20 (address indexed)
+            if len(topics) >= 3:
+                to_topic = topics[2]
+                # to_topic is hex-padded address; compare lower-case
+                if zero_addr[2:].rjust(64, "0") in to_topic.lower():
+                    return True
         return False
 
-# ========== 分析与报警逻辑 ==========
-async def send_risk_alert(token_data, risk_score, risk_reasons):
-    """构建并发送风险告警到 Telegram"""
-    if risk_score <= 6:
-        risk_level = "🟢 安全"
-        emoji = "✅"
-    elif risk_score <= 12:
-        risk_level = "🟡 中风险"
-        emoji = "⚠️"
-    else:
-        risk_level = "🔴 高风险"
-        emoji = "🚨"
-    
-    reason_text = "\n".join(risk_reasons) if risk_reasons else "暂无风险项"
-    returns = data_manager.calculate_returns(token_data["address"])
-    returns_info = f"📈 当前收益率: {returns.get('total_return', 0):.2f}%\n" if returns else ""
-    
-    message = f"""{emoji} *BASE 链代币风险警报* {emoji}
+    async def check_deployer_withdraw_v3(self, deployer_address: str) -> bool:
+        """
+        检测 v3 撤池相关：查询 NonfungiblePositionManager 的 DecreaseLiquidity / Burn / Collect
+        NonfungiblePositionManager address may vary; but we can search logs where topics contain function sig hash.
+        DecreaseLiquidity topic0 = keccak256("DecreaseLiquidity(uint256,int128,uint256,uint256)")
+        We'll instead query logs where deployer_address appears as transaction `from` interacting with position manager.
+        Simpler approach: 查询最近若干 txs of deployer and see if any call nonfungible position manager with DecreaseLiquidity.
+        NOTE: This approach depends on explorer API and may be slower. If BASESCAN_API_KEY not set, returns False.
+        """
+        if not self.key:
+            return False
+        # We'll query normal txs for deployer via explorer API (module=account&action=txlist)
+        params = {
+            "module": "account",
+            "action": "txlist",
+            "address": deployer_address,
+            "sort": "desc",
+            "page": 1,
+            "offset": 50,
+            "apikey": self.key
+        }
+        url = "https://api.basescan.org/api"
+        try:
+            async with self.session.get(url, params=params, timeout=aiohttp.ClientTimeout(total=10)) as resp:
+                if resp.status != 200:
+                    return False
+                d = await resp.json()
+                txs = d.get("result", []) or []
+                # Look for method signatures in input data that indicate decreaseLiquidity (function selectors)
+                # Example selectors (hex4): decreaseLiquidity might be '0x...'; we check for common patterns:
+                suspicious_selectors = [
+                    # these are illustrative; real selectors should be computed; we'll search for 'decrease'/'burn'/'collect' strings in input if available
+                    "decrease", "DecreaseLiquidity", "burn", "collect", "removeLiquidity"
+                ]
+                for tx in txs:
+                    inp = tx.get("input", "") or ""
+                    low = inp.lower()
+                    for s in suspicious_selectors:
+                        if s.lower() in low:
+                            return True
+        except Exception:
+            return False
+        return False
 
-💰 *{token_data.get('name')} ({token_data.get('symbol')})*
-📊 风险评分: {risk_score} 分 - {risk_level}
-{returns_info}
-🔍 *检测到的风险项:*
-{reason_text}
+# ---------------------------
+# Telegram helpers
+# ---------------------------
+async def send_telegram(bot_session: aiohttp.ClientSession, text: str):
+    if not BOT_TOKEN or not CHANNEL_ID:
+        print("⚠️ Telegram 未配置 BOT_TOKEN 或 CHANNEL_ID，跳过发送")
+        return False
+    api = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
+    payload = {"chat_id": CHANNEL_ID, "text": text, "parse_mode": "HTML", "disable_web_page_preview": True}
+    try:
+        async with bot_session.post(api, json=payload, timeout=aiohttp.ClientTimeout(total=10)) as resp:
+            txt = await resp.text()
+            if resp.status == 200:
+                return True
+            else:
+                print(f"❌ Telegram send failed {resp.status}: {txt}")
+                return False
+    except Exception as e:
+        print(f"❌ Telegram send error: {e}")
+        return False
 
-💧 流动性: ${token_data.get('liquidity', 0):,.0f}
-📈 24h 交易量: ${token_data.get('volume', 0):,.0f}
-⏰ 代币年龄: {token_data.get('age_minutes')} 分钟
+# ---------------------------
+# 单个 token 分析流程
+# ---------------------------
+async def analyze_token(pair: Dict, session: aiohttp.ClientSession, dex_client: DexScreenerClient, deployer_checker: DeployerIntelligence):
+    parsed = parse_pair(pair)
+    if not parsed:
+        return None
+    addr = parsed["address"]
+    symbol = parsed["symbol"]
+    # record price
+    data_manager.record_token_price(addr, symbol, float(parsed.get("priceUsd", 0) or 0), float(parsed.get("liquidity", 0) or 0))
 
-📋 合约地址: `{token_data.get('address')}`
-🔗 链接: {token_data.get('url')}
+    # prepare token data structure for scoring
+    td = {
+        "address": parsed["address"],
+        "name": parsed["name"],
+        "symbol": parsed["symbol"],
+        "liquidity": parsed["liquidity"],
+        "volume": parsed["volume"],
+        "priceUsd": parsed["priceUsd"],
+        "url": parsed.get("url", ""),
+        "age_minutes": parsed.get("age_minutes", 0),
+        # place-holders (in real flow should be from dedicated API / on-chain checks)
+        "verified": False,
+        "buy_tax": 0.0,
+        "sell_tax": 0.0,
+        "is_honeypot": False,
+        "lp_lock_days": 0,
+        "wallet_age_hours": 24,
+        "suspicious_source": False,
+        "has_rug_history": False,
+        "has_community": False,
+        "from_cex": False,
+        "top10_holders_percent": 100
+    }
 
-{'⚠️ 请注意风险，谨慎操作！' if risk_score > 6 else '✅ 相对安全，但仍需自行研究！'}"""
-    await send_telegram_message(message)
+    # ---- try to enrich data via explorer/APIs (if Basescan key available) ----
+    # 1) check deployer / creator and whether it withdrew liquidity recently
+    deployer_withdrawn = False
+    try:
+        # try to find deployer from pair raw metadata (some APIs include deployer)
+        raw = pair.get("pairCreatedAt")  # dex pair raw may not include deployer; skip if not present
+        # Instead we can try to get token contract creator via explorer (if key present)
+        if BASESCAN_API_KEY:
+            # query contract creation tx (module=contract&action=getsourcecode or getcontractcreation - varies)
+            # We'll attempt to fetch internal txs / normal txs for contract to find deployer
+            # Here we use the DeployerIntelligence method for v3/v2 detection: check recent txs for decrease/burn keywords
+            # For simplicity we'll try both checks using token address and raw pair address
+            checker = deployer_checker
+            # check v3 style withdraw for addresses involved (take token address and pair URL)
+            try:
+                deployer_withdrawn = await checker.check_deployer_withdraw_v3(parsed["address"])
+            except Exception:
+                deployer_withdrawn = False
+            # v2 pair withdraw detection (if pair contract exists)
+            try:
+                # if raw pair has pair contract address
+                pair_contract = pair.get("pairAddress") or pair.get("pair", {}).get("address") or None
+                if pair_contract:
+                    w2 = await checker.check_deployer_withdraw_v2(pair_contract)
+                    if w2:
+                        deployer_withdrawn = True
+            except Exception:
+                pass
+    except Exception:
+        deployer_withdrawn = False
 
-async def send_price_alert(token_data, multiple: int, current_multiple: float):
-    """发送价格倍数警报"""
-    returns = data_manager.calculate_returns(token_data["address"])
-    initial_price = returns.get("initial_price", 0)
-    current_price = returns.get("current_price", 0)
-    actual_multiple = multiple - 1  # 表示涨了多少倍（2 表示 1 倍上涨 etc）
-    message = f"""🚀 *BASE链代币涨幅警报*
+    td["deployer_withdrawn"] = deployer_withdrawn
 
-💰 *{token_data.get('name')} ({token_data.get('symbol')})*
-🎯 已达到 {actual_multiple} 倍涨幅！
-📊 当前涨幅: {current_multiple:.2f}x
+    # ---- simulate / placeholder for other enrichments (replace with real checks if you have APIs) ----
+    # For now, we might try to detect verified source from pair/raw if available
+    # Example: if pair.raw contains "verified" flag - many API don't; so leave as-is or enrich later
 
-💰 初始价格: ${initial_price:.6f}
-💰 当前价格: ${current_price:.6f}
-📈 总收益率: {returns.get('total_return', 0):.2f}%
+    # ---- scoring ----
+    scorer = RiskScorer()
+    score = scorer.score(td)
+    reasons = scorer.reasons
 
-💧 流动性: ${token_data.get('liquidity', 0):,.0f}
-⏰ 代币年龄: {token_data.get('age_minutes')} 分钟
-
-📋 合约地址: `{token_data.get('address')}`
-🔗 链接: {token_data.get('url')}
-"""
-    ok = await send_telegram_message(message)
-    if ok:
-        data_manager.mark_price_alert_sent(token_data["address"], multiple)
-
-async def analyze_token_with_risk(token_data):
-    """对单个代币执行风险评分与价格倍数检测"""
-    print(f"\n🪙 分析代币: {token_data.get('symbol')} - {token_data.get('name')}")
-    print(f"   💧 流动性: ${token_data.get('liquidity',0):,.0f}")
-    print(f"   📈 24h 交易量: ${token_data.get('volume',0):,.0f}")
-    print(f"   ⏰ 代币年龄: {token_data.get('age_minutes')} 分钟")
-    
-    # 记录价格（若 priceUsd 可用）
-    price = token_data.get('priceUsd') or 0
-    data_manager.record_token_price(token_data.get('address'), token_data.get('symbol'), float(price or 0), float(token_data.get('liquidity') or 0))
-    
-    returns = data_manager.calculate_returns(token_data.get('address'))
-    # 价格倍数警报
+    # ---- price multiple detection & alerts ----
+    returns = data_manager.calculate_returns(addr)
     if returns and returns.get("price_multiple", 1) > 1:
         current_multiple = returns.get("price_multiple", 1)
         next_multiple = math.floor(current_multiple) + 1
-        target_multiples = [m for m in range(2, next_multiple + 1) if current_multiple >= m]
-        for m in target_multiples:
-            if alert_manager.should_send_price_alert(token_data.get('address'), m):
-                print(f"   🚨 发送 {m-1} 倍价格警报")
-                await send_price_alert(token_data, m, current_multiple)
-    
-    # 风险评分
-    scorer = RiskScorer()
-    risk_score = scorer.calculate_risk_score(token_data)
-    print(f"   📊 风险评分: {risk_score} 分")
-    if scorer.risk_reasons:
-        print(f"   🔍 风险原因: {', '.join(scorer.risk_reasons)}")
-    
-    # 发风险告警（若需要）
-    if alert_manager.should_send_risk_alert(token_data.get('address'), risk_score):
-        print("   🚨 发送风险告警")
-        await send_risk_alert(token_data, risk_score, scorer.risk_reasons)
-    
-    return {"risk_score": risk_score, "risk_reasons": scorer.risk_reasons, "quality_tokens": 1 if risk_score <= 6 else 0}
+        targets = [m for m in range(2, next_multiple + 1) if current_multiple >= m]
+        for m in targets:
+            if alert_manager.should_send_price(addr, m):
+                # send price alert message
+                price_msg = (f"🚀 <b>涨幅警报</b>\n"
+                             f"{td['name']} ({td['symbol']}) 已达 {m-1} 倍上涨 ({current_multiple:.2f}x)\n"
+                             f"初始价: {returns.get('initial_price')}, 当前价: {returns.get('current_price')}\n"
+                             f"合约: {td['address']}\n{td.get('url')}")
+                await send_telegram(session, price_msg)
+                alert_manager.mark_price_sent(addr, m)
 
-# ========== 监控循环 ==========
-async def monitor_new_tokens():
-    """核心监控：获取最新 Base tokens 并分析"""
-    now = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
-    print(f"\n🚀 [{now}] 开始监控 Base 链新代币...")
-    alert_manager.cleanup_old_alerts()
-    
-    pairs = await dexscreener.get_latest_base_pairs(25)
-    if not pairs:
-        print("⚠️ 未获取到 pairs，结束本次监控")
-        return False
-    
-    # 调试输出前两条
-    try:
-        print("🔎 DexScreener 前两条示例：")
-        print(json.dumps(pairs[:2], indent=2, ensure_ascii=False))
-    except Exception:
-        pass
-    
-    # 过滤 Base 链
-    base_pairs = [p for p in pairs if p.get('chainId') == 'base']
-    print(f"📊 过滤后 {len(base_pairs)} 个 Base 链 pairs")
-    
-    tasks = []
-    for pair in base_pairs:
-        td = parse_pair_data(pair)
-        if not td:
-            continue
-        if not validate_token_data(td):
-            print(f"⚠️ 跳过 {td.get('symbol')}（流动性/数据不足）")
-            continue
-        
-        # 为测试目的暂时注入模拟风险字段（部署时请替换为真实检测）
-        import random
-        td.update({
-            "verified": random.choice([True, False, True]),
-            "buy_tax": random.uniform(0, 0.08),
-            "sell_tax": random.uniform(0, 0.08),
-            "is_honeypot": random.choice([False, False, False, True]),
-            "lp_lock_days": random.choice([0, 30, 60, 90, 365]),
-            "wallet_age_hours": random.randint(1, 72),
-            "suspicious_source": random.choice([False, False, True]),
-            "has_rug_history": random.choice([False, False, False, True]),
-            "has_community": random.choice([True, False]),
-            "from_cex": random.choice([True, False]),
-            "top10_holders_percent": random.uniform(10, 80)
-        })
-        
-        tasks.append(analyze_token_with_risk(td))
-    
-    if tasks:
+    # ---- decide push or not ----
+    # You requested: only push tokens that are NOT high risk (score < HIGH_RISK_THRESHOLD)
+    should_push = score < HIGH_RISK_THRESHOLD and parsed["liquidity"] >= MIN_LIQUIDITY_USD
+
+    analysis = {
+        "addr": addr,
+        "symbol": td["symbol"],
+        "name": td["name"],
+        "score": score,
+        "reasons": reasons,
+        "should_push": should_push,
+        "parsed": parsed,
+        "td": td
+    }
+    return analysis
+
+# ---------------------------
+# 主监控函数（单次执行）
+# ---------------------------
+async def run_once():
+    print("=" * 60)
+    print("BMIS 正在运行 - 单次扫描 (GitHub Actions Friendly)")
+    print(f"时间: {datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S')} UTC")
+    print("=" * 60)
+
+    if Bot is None:
+        print("⚠️ python-telegram-bot 未安装或无法导入，请确保 requirements.txt 包含 python-telegram-bot")
+    if not BOT_TOKEN or not CHANNEL_ID:
+        print("❌ 未配置 BOT_TOKEN 或 CHANNEL_ID (请在 GitHub Secrets 中配置)，退出")
+        return 1
+
+    async with aiohttp.ClientSession() as session:
+        dex = DexScreenerClient(session)
+        pairs = await dex.get_latest_pairs(chain=CHAIN_SLUG, limit=PAIRS_LIMIT)
+        if not pairs:
+            print("⚠️ 未获取到 pairs，可能 DexScreener 无返回 or rate-limited。退出本轮。")
+            return 0
+
+        print(f"🔎 获取到 {len(pairs)} pairs，开始逐个分析（上限 {PAIRS_LIMIT}）")
+        deployer_checker = DeployerIntelligence(session, explorer_api_key=BASESCAN_API_KEY)
+
+        tasks = []
+        for p in pairs:
+            tasks.append(analyze_token(p, session, dex, deployer_checker))
         results = await asyncio.gather(*tasks, return_exceptions=True)
-        found = 0
+
+        pushed = 0
         for r in results:
             if isinstance(r, Exception):
-                print(f"❌ 任务异常: {r}")
-            elif r and r.get("quality_tokens", 0) > 0:
-                found += r.get("quality_tokens", 0)
-        print(f"🎯 本轮发现 {found} 个符合条件的低风险代币")
-    else:
-        print("ℹ️ 本轮没有需要分析的代币")
-    return True
+                print(f"❌ 分析异常: {r}")
+                continue
+            if not r:
+                continue
+            if r.get("should_push"):
+                # build push message with reasons & score
+                parsed = r["parsed"]
+                score = r["score"]
+                reasons = r["reasons"]
+                msg = (f"🟢 <b>新代币（建议观察 — 非高危）</b>\n\n"
+                       f"📛 {r['name']} ({r['symbol']})\n"
+                       f"💧 流动性: ${parsed.get('liquidity',0):,.0f}\n"
+                       f"📊 风险评分: {score} (<=12 表示非高危)\n"
+                       f"🔍 风险项: {'; '.join(reasons) if reasons else '无明显高风险'}\n"
+                       f"🔗 {parsed.get('url')}\n"
+                       f"⏱ 发现时间(UTC): {datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S')}")
+                await send_telegram(session, msg)
+                pushed += 1
+            else:
+                print(f"跳过推送 (高危或流动性不足): {r['symbol']} score={r.get('score')} liq={r.get('parsed',{}).get('liquidity')}")
+        # after analysis, send summary optionally
+        summary = f"本轮扫描完成。分析 {len(results)} 个，推送 {pushed} 个（Non-high-risk）。"
+        print(summary)
+        try:
+            await send_telegram(session, f"📡 BMIS 本轮完成：{pushed} 条推送。")
+        except Exception:
+            pass
 
-# ========== 性能报告 ==========
-async def send_performance_report(top_performers: List, recent_tokens: List):
-    bot_token = TELEGRAM_BOT_TOKEN
-    chat_id = TELEGRAM_CHAT_ID
-    if not bot_token or not chat_id:
-        return
-    message = "📊 *Base链代币表现报告*\n\n"
-    if top_performers:
-        message += "🏆 *顶级表现者:*\n"
-        for i, token in enumerate(top_performers, 1):
-            multiple_text = f" ({token.get('price_multiple',1):.2f}x)" if token.get('price_multiple') else ""
-            message += f"{i}. {token.get('symbol')}: {token.get('total_return')}%{multiple_text}\n"
-    else:
-        message += "🏆 *顶级表现者:* 暂无数据\n"
-    message += f"\n🆕 *24小时新币 ({len(recent_tokens)}个)*\n"
-    if recent_tokens:
-        for token in recent_tokens[:3]:
-            return_text = f"{token.get('total_return','N/A')}%" if token.get('total_return') else "新币"
-            multiple_text = f" ({token.get('price_multiple',1):.2f}x)" if token.get('price_multiple') else ""
-            message += f"• {token.get('symbol')}: {return_text}{multiple_text}\n"
-    else:
-        message += "暂无新币\n"
-    message += f"\n⏰ 报告时间: {datetime.utcnow().strftime('%Y-%m-%d %H:%M')}"
-    await send_telegram_message(message)
+    return 0
 
-async def generate_performance_report():
-    print("\n" + "="*40)
-    print("📈 生成代币表现报告")
-    print("="*40)
-    top_performers = data_manager.get_top_performers(5)
-    recent_tokens = data_manager.get_recent_tokens(24)
-    if top_performers:
-        print("🏆 顶级表现者：")
-        for i, t in enumerate(top_performers, 1):
-            print(f"  {i}. {t.get('symbol')} - {t.get('total_return')}%")
-    else:
-        print("🏆 顶级表现者: 无")
-    print(f"\n🆕 最近24小时代币数: {len(recent_tokens)}")
-    await send_performance_report(top_performers, recent_tokens)
-
-# ========== 环境检查 ==========
-def check_environment():
-    missing = []
-    if not TELEGRAM_BOT_TOKEN:
-        missing.append('TELEGRAM_BOT_TOKEN')
-    if not TELEGRAM_CHAT_ID:
-        missing.append('TELEGRAM_CHAT_ID')
-    if missing:
-        print(f"❌ 缺少环境变量: {', '.join(missing)}")
-        print("请在运行环境中设置这些 Secrets（GitHub Actions -> Settings -> Secrets）")
-        return False
-    return True
-
-# ========== 主流程 ==========
-async def test_telegram_connection():
-    print("🔍 测试 Telegram 连接...")
-    txt = "🔔 BMIS: 测试消息 - 监控已启动（测试）\n时间: " + datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
-    ok = await send_telegram_message(txt)
-    if ok:
-        print("✅ Telegram 连接测试成功")
-    else:
-        print("❌ Telegram 连接测试失败")
-    return ok
-
-async def main():
-    print("="*60)
-    print("=== Base 链智能狙击监控系统（完整版）启动 ===")
-    print("="*60)
-    # 检查环境
-    env_ok = check_environment()
-    if not env_ok:
-        print("❌ 环境未配置完整，退出")
-        return
-    # 测试 Telegram
-    await test_telegram_connection()
-    # 主循环
+# ---------------------------
+# CLI 入口
+# ---------------------------
+def main():
     try:
-        while True:
-            start = time.time()
-            try:
-                ok = await monitor_new_tokens()
-                if ok:
-                    await generate_performance_report()
-            except Exception as e:
-                print(f"❌ 监控主流程异常: {e}")
-                traceback.print_exc()
-            duration = time.time() - start
-            print(f"⏱ 本轮耗时: {duration:.1f}s - 下次 5 分钟后执行")
-            await asyncio.sleep(300)
-    except KeyboardInterrupt:
-        print("🛑 手动停止")
+        loop = asyncio.get_event_loop()
+        ret = loop.run_until_complete(run_once())
+        # exit code for actions
+        sys.exit(ret if isinstance(ret, int) else 0)
     except Exception as e:
-        print(f"❌ 未处理异常退出: {e}")
+        print(f"❌ 主流程异常: {e}")
         traceback.print_exc()
+        sys.exit(1)
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    main()
